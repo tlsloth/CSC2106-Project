@@ -46,11 +46,11 @@ LORA_SYNC_WORD  = 0x12             # Project-wide sync word
 LORA_TX_POWER   = 14               # dBm
 
 # LoRa SPI pin mapping (SX1276 RFM95W shield)
-LORA_SPI_ID     = 0
-LORA_PIN_SCK    = 18
-LORA_PIN_MOSI   = 19
-LORA_PIN_MISO   = 16
-LORA_PIN_CS     = 17
+LORA_SPI_ID     = 1
+LORA_PIN_SCK    = 10
+LORA_PIN_MOSI   = 11
+LORA_PIN_MISO   = 12
+LORA_PIN_CS     = 13
 LORA_PIN_RESET  = 20
 LORA_PIN_DIO0   = 21               # SX127x uses DIO0 (not DIO1)
 

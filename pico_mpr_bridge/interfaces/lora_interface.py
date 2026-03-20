@@ -7,6 +7,54 @@ from utils import logger
 from core import packet
 from core.neighbour import create_hello_payload, parse_hello
 
+
+class _SPIShim:
+    """
+    Wraps a MicroPython SPI object to fix the broken two-phase write pattern
+    used by the sx127x external library. sx127x.transfer() calls spi.write()
+    followed immediately by spi.write_readinto() while CS is held low, which
+    splits the 2-byte SX127x frame into two separate SPI transactions. The
+    chip cannot respond correctly to this. This shim buffers the first write()
+    call and flushes it atomically together with the next write_readinto() call.
+    """
+
+    def __init__(self, spi):
+        self._spi = spi
+        self._pending = None  # buffered bytes from the last write() call
+
+    def write(self, data):
+        # Buffer this instead of sending immediately.
+        # sx127x always follows write(address) with write_readinto(value, resp).
+        self._pending = bytes(data)
+
+    def write_readinto(self, write_buf, read_buf):
+        if self._pending is not None:
+            # Combine buffered address byte(s) with the incoming data byte(s)
+            # and send as one atomic transaction.
+            tx = self._pending + bytes(write_buf)
+            rx = bytearray(len(tx))
+            self._spi.write_readinto(tx, rx)
+            # Copy back only the bytes corresponding to write_buf's position.
+            offset = len(self._pending)
+            for i in range(len(read_buf)):
+                read_buf[i] = rx[offset + i]
+            self._pending = None
+        else:
+            # No pending write - pass through directly.
+            self._spi.write_readinto(write_buf, read_buf)
+
+    def readinto(self, buf, write=0x00):
+        self._pending = None
+        self._spi.readinto(buf, write)
+
+    def init(self, **kwargs):
+        self._pending = None
+        self._spi.init(**kwargs)
+
+    def deinit(self):
+        self._pending = None
+        self._spi.deinit()
+
 TAG = "LoRa"
 
 _sx = None  # SX127x driver instance
@@ -112,7 +160,7 @@ def init():
         logger.debug(TAG, "MISO pull test: pull-up={}, pull-down={}, verdict={}".format(
             miso_up, miso_down, miso_state))
         
-        # Set up SPI bus with explicit pins (alternate SPI0 pins: GP16/18/19)
+        # Set up SPI bus with explicit pins from config.
         spi = SPI(
             config.LORA_SPI_ID,
             baudrate=500000,
@@ -165,9 +213,11 @@ def init():
 
         if version != 0x12:
             if miso_state == "stuck_low":
-                logger.warn(TAG, "MISO appears stuck LOW at GPIO level. Check GP16 continuity and shorts to GND.")
+                logger.warn(TAG, "MISO appears stuck LOW at GPIO level. Check GP{} continuity and shorts to GND.".format(
+                    config.LORA_PIN_MISO))
             elif miso_state == "stuck_high":
-                logger.warn(TAG, "MISO appears stuck HIGH at GPIO level. Check GP16 shorts to 3V3 and CS routing.")
+                logger.warn(TAG, "MISO appears stuck HIGH at GPIO level. Check GP{} shorts to 3V3 and CS routing.".format(
+                    config.LORA_PIN_MISO))
             elif miso_state == "floating_or_weakly_driven":
                 logger.warn(TAG, "MISO appears floating/weakly driven. This usually means module not actively driving MISO.")
 
@@ -179,9 +229,20 @@ def init():
                 logger.warn(TAG, "Version probe failed: SPI transaction errors")
             else:
                 logger.warn(TAG, "Unexpected version 0x{:02X}: chip mismatch or bus corruption".format(version))
-            logger.warn(TAG, "Check: 3.3V/GND, CS GP17, SCK GP18, MOSI GP19, MISO GP16, RST GP20, DIO0 GP21")
+            logger.warn(TAG, "Check: 3.3V/GND, CS GP{}, SCK GP{}, MOSI GP{}, MISO GP{}, RST GP{}, DIO0 GP{}".format(
+                config.LORA_PIN_CS,
+                config.LORA_PIN_SCK,
+                config.LORA_PIN_MOSI,
+                config.LORA_PIN_MISO,
+                config.LORA_PIN_RESET,
+                config.LORA_PIN_DIO0,
+            ))
             _sx = None
             return False
+
+        # Re-normalize SPI bus to target baud rate after diagnostic probe.
+        spi.init(baudrate=500000, polarity=0, phase=0)
+        time.sleep_ms(10)
 
         # Create SX127x instance with pins dictionary
         pins = {
@@ -202,8 +263,8 @@ def init():
             "sync_word": config.LORA_SYNC_WORD,
             "enable_CRC": True,
         }
-        
-        _sx = SX127x(spi, pins, parameters)
+
+        _sx = SX127x(_SPIShim(spi), pins, parameters)
         
         # Give chip time to fully initialize after reset
         time.sleep_ms(200)

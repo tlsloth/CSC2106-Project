@@ -38,6 +38,7 @@ MQTT_CMD_TOPIC      = "mesh/cmd/{node_id}"
 MQTT_HELLO_TOPIC    = "mesh/hello"
 
 # LoRa parameters (SX1276 / RFM95W)
+LORA_TRANSPORT  = "UART"          # "SPI" direct Pico, "I2C" bridge, "UART" bridge
 LORA_FREQ       = 915.0            # MHz (915 MHz ISM band)
 LORA_BW         = 125.0            # kHz bandwidth
 LORA_SF         = 9                # Spreading factor
@@ -45,12 +46,30 @@ LORA_CR         = 5                # Coding rate (4/5)
 LORA_SYNC_WORD  = 0x12             # Project-wide sync word
 LORA_TX_POWER   = 14               # dBm
 
+# LoRa over UART bridge parameters (Maker UNO + LoRa shield)
+UART_LORA_ID         = 1
+UART_LORA_BAUD       = 57600
+UART_LORA_TX_PIN     = 4
+UART_LORA_RX_PIN     = 5
+UART_LORA_TIMEOUT_MS = 100
+
+# LoRa over I2C bridge parameters (Maker UNO + LoRa shield)
+I2C_LORA_ID         = 0
+I2C_LORA_SDA_PIN    = 4
+I2C_LORA_SCL_PIN    = 5
+I2C_LORA_FREQ       = 50000
+I2C_LORA_ADDR       = 0x42
+I2C_LORA_POLL_MS    = 100
+I2C_LORA_MAX_FRAME  = 200
+I2C_LORA_CHUNK      = 24
+I2C_LORA_RETRIES    = 3
+
 # LoRa SPI pin mapping (SX1276 RFM95W shield)
-LORA_SPI_ID     = 1
-LORA_PIN_SCK    = 10
-LORA_PIN_MOSI   = 11
-LORA_PIN_MISO   = 12
-LORA_PIN_CS     = 13
+LORA_SPI_ID     = 0
+LORA_PIN_SCK    = 18
+LORA_PIN_MOSI   = 19
+LORA_PIN_MISO   = 16
+LORA_PIN_CS     = 17
 LORA_PIN_RESET  = 20
 LORA_PIN_DIO0   = 21               # SX127x uses DIO0 (not DIO1)
 
@@ -71,3 +90,9 @@ MAX_PAYLOAD_SIZE    = 200           # bytes — fragments if larger
 
 # Logging
 LOG_LEVEL       = "DEBUG"           # "DEBUG" | "INFO" | "WARN" | "ERROR"
+
+# Startup safety
+ALLOW_BOOTSEL_SAFE_MODE   = True     # Hold BOOTSEL during startup window to skip app launch
+STARTUP_GRACE_MS          = 4000     # Safe-mode detection window after boot
+AUTO_RESET_ON_FATAL       = False    # Avoid reboot loops while debugging
+WATCHDOG_RESET_ON_TIMEOUT = False    # Keep REPL accessible if watchdog trips

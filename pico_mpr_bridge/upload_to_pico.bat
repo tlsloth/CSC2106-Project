@@ -42,12 +42,37 @@ REM Use script location as project root
 set "PROJECT_DIR=%~dp0"
 pushd "%PROJECT_DIR%"
 
-echo [3/6] Uploading top-level files...
-mpremote %MP_CONN% fs cp "main.py" ":main.py"
-if errorlevel 1 goto :upload_error
+if not exist "main.py" (
+    echo ERROR: main.py not found in %PROJECT_DIR%
+    goto :upload_error
+)
+if not exist "config.py" (
+    echo ERROR: config.py not found in %PROJECT_DIR%
+    goto :upload_error
+)
+if not exist "core" (
+    echo ERROR: core folder not found in %PROJECT_DIR%
+    goto :upload_error
+)
+if not exist "interfaces" (
+    echo ERROR: interfaces folder not found in %PROJECT_DIR%
+    goto :upload_error
+)
+if not exist "utils" (
+    echo ERROR: utils folder not found in %PROJECT_DIR%
+    goto :upload_error
+)
+if not exist "lib" (
+    echo ERROR: lib folder not found in %PROJECT_DIR%
+    goto :upload_error
+)
 
-mpremote %MP_CONN% fs cp "config.py" ":config.py"
-if errorlevel 1 goto :upload_error
+echo [3/6] Uploading top-level Python files...
+for %%F in (*.py) do (
+    echo   - %%F
+    mpremote %MP_CONN% fs cp "%%F" ":%%F"
+    if errorlevel 1 goto :upload_error
+)
 
 echo [4/6] Uploading folders...
 mpremote %MP_CONN% fs cp -r "core" ":"

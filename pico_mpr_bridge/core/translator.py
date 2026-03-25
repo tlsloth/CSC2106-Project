@@ -66,26 +66,56 @@ def translate_from_mqtt(topic, msg_bytes):
         return None
 
 
+def _parse_csv_sensor(text):
+    """Parse 'K:V,K:V' sensor strings (e.g. 'T:25.3,H:60.5') into a dict.
+
+    Normalises common short keys used by Arduino DHT sketches:
+      T  -> temp
+      H  -> humidity
+    Returns an empty dict on any parse failure.
+    """
+    _key_map = {"T": "temp", "H": "humidity"}
+    parts = {}
+    try:
+        for item in text.split(","):
+            k, v = item.split(":", 1)
+            k = _key_map.get(k.strip(), k.strip())
+            parts[k] = float(v.strip())
+    except (ValueError, AttributeError):
+        return {}
+    return parts
+
+
 def translate_lora_payload(raw_data, source_id="unknown"):
     """Parse a raw LoRa payload into a standard packet.
 
-    Supports both JSON and simple struct-packed formats.
+    Handles, in order:
+      1. Full JSON packet (from another bridge node)
+      2. JSON-encoded payload dict
+      3. CSV sensor format: 'T:25.3,H:60.5'  (Arduino DHT sensor)
+      4. Raw string fallback
     """
-    # Try JSON first
+    # 1. Try full JSON packet first
     pkt = packet.decode_packet(raw_data)
     if pkt:
         return pkt
 
-    # Fallback: treat as raw sensor payload (e.g., temperature float as text)
-    try:
-        if isinstance(raw_data, (bytes, bytearray)):
+    # Decode bytes once for subsequent steps
+    if isinstance(raw_data, (bytes, bytearray)):
+        try:
             raw_data = raw_data.decode("utf-8")
+        except UnicodeError:
+            raw_data = str(raw_data)
 
-        # Try to parse as simple key=value or JSON snippet
+    # 2. Try JSON-encoded payload dict
+    try:
         payload = json.loads(raw_data)
-    except (ValueError, UnicodeError):
-        # Last resort: treat entire thing as a raw value
-        payload = {"raw": str(raw_data)}
+    except ValueError:
+        # 3. Try Arduino-style CSV sensor format (e.g. "T:25.3,H:60.5")
+        payload = _parse_csv_sensor(raw_data)
+        if not payload:
+            # 4. Last resort: preserve raw string
+            payload = {"raw": raw_data}
 
     priority = packet.classify_priority(payload)
     return packet.create_packet(

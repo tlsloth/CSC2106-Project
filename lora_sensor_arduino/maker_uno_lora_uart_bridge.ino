@@ -1,110 +1,153 @@
 #include <SPI.h>
-#include <LoRa.h>
+#include <RH_RF95.h>
 #include <SoftwareSerial.h>
 
-#define LORA_FREQ 915E6
-#define LORA_SF 9
-#define LORA_BW 125E3
-#define LORA_CR 5
-#define LORA_SYNC_WORD 0x12
-#define LORA_TX_POWER 17
+// LoRa Shield Pins
+#define RFM95_CS    10
+#define RFM95_RST    9
+#define RFM95_INT    2
+#define RF95_FREQ  920.0
 
-#define LORA_CS 10
-#define LORA_RESET 9
-#define LORA_DIO0 2
+// UART to Pico W
+#define PICO_RX_PIN  7    // Arduino RX <- Pico TX
+#define PICO_TX_PIN  6    // Arduino TX -> Pico RX (use level shifting)
+#define PICO_BAUD    9600
 
-// Dedicated UART bridge pins to Pico (avoids USB contention on D0/D1)
-#define BRIDGE_TX_PIN 6
-#define BRIDGE_RX_PIN 7
-#define BRIDGE_BAUD 57600
+// Protocol
+#define PACKET_START  0xCB
+#define MY_NODE_ID    'B'
+#define MSG_TYPE_DATA 0x01
+#define MSG_TYPE_ACK  0x02
+#define HEADER_SIZE    6
+#define MAX_PAYLOAD   20
 
-#define STATUS_INTERVAL_MS 5000UL
+struct Packet {
+  uint8_t start;
+  uint8_t from;
+  uint8_t to;
+  uint8_t type;
+  uint8_t seq;
+  uint8_t len;
+  uint8_t payload[MAX_PAYLOAD];
+  uint8_t checksum;
+};
 
-unsigned long lastStatusMs = 0;
-SoftwareSerial bridgeSerial(BRIDGE_RX_PIN, BRIDGE_TX_PIN);  // RX, TX
+RH_RF95 rf95(RFM95_CS, RFM95_INT);
+SoftwareSerial picoSerial(PICO_RX_PIN, PICO_TX_PIN);
 
-
-void sendBridgeLine(const String &line) {
-  bridgeSerial.println(line);
-  Serial.println(line);  // keep USB debug mirror
+uint8_t calculateChecksum(Packet *pkt) {
+  uint8_t cs = pkt->start ^ pkt->from ^ pkt->to ^ pkt->type ^ pkt->seq ^ pkt->len;
+  for (uint8_t i = 0; i < pkt->len; i++) {
+    cs ^= pkt->payload[i];
+  }
+  return cs;
 }
 
+bool deserializePacket(uint8_t *buf, uint8_t bufLen, Packet *pkt) {
+  if (bufLen < HEADER_SIZE + 1) return false;
+  if (buf[0] != PACKET_START) return false;
 
-void handleTxCommandLine(const String &line) {
-  if (line.startsWith("LORA_TX|")) {
-    String txPayload = line.substring(8);
-    if (txPayload.length() > 0) {
-      LoRa.beginPacket();
-      LoRa.print(txPayload);
-      LoRa.endPacket();
-    }
+  pkt->start = buf[0];
+  pkt->from = buf[1];
+  pkt->to = buf[2];
+  pkt->type = buf[3];
+  pkt->seq = buf[4];
+  pkt->len = buf[5];
+
+  if (pkt->len > MAX_PAYLOAD) return false;
+  if (bufLen < HEADER_SIZE + pkt->len + 1) return false;
+
+  for (uint8_t i = 0; i < pkt->len; i++) {
+    pkt->payload[i] = buf[HEADER_SIZE + i];
   }
+  pkt->checksum = buf[HEADER_SIZE + pkt->len];
+
+  return (calculateChecksum(pkt) == pkt->checksum);
 }
 
-void setupLoRa() {
-  LoRa.setPins(LORA_CS, LORA_RESET, LORA_DIO0);
+void sendAck(Packet *rxPkt) {
+  Packet ack;
+  ack.start = PACKET_START;
+  ack.from = MY_NODE_ID;
+  ack.to = rxPkt->from;
+  ack.type = MSG_TYPE_ACK;
+  ack.seq = rxPkt->seq;
+  ack.len = 0;
+  ack.checksum = calculateChecksum(&ack);
 
-  if (!LoRa.begin(LORA_FREQ)) {
-    sendBridgeLine("LORA_ERR|INIT|LoRa begin failed");
-    while (1) {
-      delay(1000);
-    }
-  }
+  uint8_t buf[7] = {
+    ack.start, ack.from, ack.to,
+    ack.type, ack.seq, ack.len, ack.checksum
+  };
 
-  LoRa.setSpreadingFactor(LORA_SF);
-  LoRa.setSignalBandwidth(LORA_BW);
-  LoRa.setCodingRate4(LORA_CR);
-  LoRa.setSyncWord(LORA_SYNC_WORD);
-  LoRa.setTxPower(LORA_TX_POWER);
+  rf95.send(buf, sizeof(buf));
+  rf95.waitPacketSent();
+  Serial.println(F("ACK sent"));
 }
 
 void setup() {
-  Serial.begin(BRIDGE_BAUD);
-  bridgeSerial.begin(BRIDGE_BAUD);
-  delay(200);
+  Serial.begin(PICO_BAUD);
+  picoSerial.begin(PICO_BAUD);
+  delay(100);
+  Serial.println(F("=== LoRa-UART Bridge (RH_RF95) ==="));
 
-  sendBridgeLine("LORA_STATUS|boot");
-  setupLoRa();
-  sendBridgeLine("LORA_STATUS|ready");
+  pinMode(RFM95_RST, OUTPUT);
+  digitalWrite(RFM95_RST, HIGH);
+  delay(10);
+  digitalWrite(RFM95_RST, LOW);
+  delay(10);
+  digitalWrite(RFM95_RST, HIGH);
+  delay(10);
+
+  if (!rf95.init()) {
+    Serial.println(F("LoRa FAILED"));
+    while (1) {}
+  }
+
+  if (!rf95.setFrequency(RF95_FREQ)) {
+    Serial.println(F("Freq FAILED"));
+    while (1) {}
+  }
+
+  rf95.setTxPower(13, false);
+  Serial.println(F("Ready - listening for LoRa..."));
 }
 
 void loop() {
-  int packetSize = LoRa.parsePacket();
-  if (packetSize > 0) {
-    String payload = "";
-    while (LoRa.available()) {
-      payload += (char)LoRa.read();
+  if (rf95.available()) {
+    uint8_t buf[50];
+    uint8_t len = sizeof(buf);
+
+    if (rf95.recv(buf, &len)) {
+      int16_t rssi = rf95.lastRssi();
+      Packet pkt;
+
+      if (deserializePacket(buf, len, &pkt)) {
+        if (pkt.type == MSG_TYPE_DATA && (pkt.to == MY_NODE_ID || pkt.to == 0xFF)) {
+          sendAck(&pkt);
+
+          char raw[MAX_PAYLOAD + 1];
+          memcpy(raw, pkt.payload, pkt.len);
+          raw[pkt.len] = '\0';
+
+          // JSON line expected by pico_mpr_bridge/interfaces/uart_lora_interface.py
+          char json[96];
+          snprintf(
+            json,
+            sizeof(json),
+            "{\"raw\":\"%s\",\"node\":\"%c\",\"rssi\":%d}",
+            raw,
+            (char)pkt.from,
+            (int)rssi
+          );
+
+          picoSerial.println(json);
+          Serial.print(F("Forwarded: "));
+          Serial.println(json);
+        }
+      } else {
+        Serial.println(F("Bad packet - dropped"));
+      }
     }
-
-    int rssi = LoRa.packetRssi();
-    float snr = LoRa.packetSnr();
-
-    String line = "LORA_RX|";
-    line += String(rssi);
-    line += "|";
-    line += String(snr, 2);
-    line += "|";
-    line += payload;
-    sendBridgeLine(line);
   }
-
-  if (bridgeSerial.available()) {
-    String line = bridgeSerial.readStringUntil('\n');
-    line.trim();
-    handleTxCommandLine(line);
-  }
-
-  // Optional: allow sending LORA_TX commands from USB serial monitor too.
-  if (Serial.available()) {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
-    handleTxCommandLine(line);
-  }
-
-  if (millis() - lastStatusMs >= STATUS_INTERVAL_MS) {
-    sendBridgeLine("LORA_STATUS|alive");
-    lastStatusMs = millis();
-  }
-
-  delay(10);
 }

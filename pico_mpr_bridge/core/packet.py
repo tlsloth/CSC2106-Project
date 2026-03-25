@@ -57,11 +57,11 @@ def decode_packet(data):
         # Validate required fields
         for field in ("src", "dst", "ttl", "priority", "seq", "payload"):
             if field not in pkt:
-                logger.warn(TAG, "Missing field '{}' in packet".format(field))
                 return None
         return pkt
-    except (ValueError, KeyError) as e:
-        logger.error(TAG, "Decode error: {}".format(e))
+    except (ValueError, KeyError):
+        # Not all inbound payloads are encoded bridge packets.
+        pass
         return None
 
 

@@ -8,6 +8,7 @@ from utils import logger
 TAG = "LoRaUART"
 
 _uart = None
+_rx_buf = b""
 
 
 def _extract_source_id(payload_bytes):
@@ -27,7 +28,28 @@ def _parse_line(raw_line):
     if not line:
         return None
 
-    parts = line.split("|", 3)
+    # JSON format: {"raw": "T:25.3,H:60.5", "node": "A", "rssi": -75}
+    # This is the format produced by lora_uart_bridge.py-compatible Arduino firmware.
+    if line.startswith('{'):
+        try:
+            obj = json.loads(line)
+            raw = obj.get("raw", "")
+            node = str(obj.get("node", "lora_uart"))
+            rssi = int(float(obj.get("rssi", 0)))
+            return {
+                "type": "LORA_RX",
+                "rssi": rssi,
+                "snr": 0.0,
+                "payload": raw.encode("utf-8"),
+                "node": node,
+            }
+        except (ValueError, KeyError):
+            pass
+
+    # Pipe-delimited formats from UNO bridge:
+    # - LORA_RX|rssi|snr|payload
+    # - LORA_RX|rssi|snr|node|payload
+    parts = line.split("|", 4)
     kind = parts[0]
 
     if kind == "LORA_RX" and len(parts) >= 4:
@@ -40,6 +62,17 @@ def _parse_line(raw_line):
             snr = float(parts[2])
         except Exception:
             snr = 0.0
+
+        if len(parts) >= 5:
+            node = parts[3].strip() or "lora_uart"
+            payload = parts[4].encode("utf-8")
+            return {
+                "type": "LORA_RX",
+                "rssi": rssi,
+                "snr": snr,
+                "payload": payload,
+                "node": node,
+            }
 
         payload = parts[3].encode("utf-8")
         return {"type": "LORA_RX", "rssi": rssi, "snr": snr, "payload": payload}
@@ -95,6 +128,7 @@ def is_available():
 async def rx_task(ingress_queue, neighbour_table):
     import uasyncio as asyncio
     from core.translator import translate_lora_payload
+    global _rx_buf
 
     logger.info(TAG, "LoRa-over-UART RX task started")
 
@@ -105,47 +139,68 @@ async def rx_task(ingress_queue, neighbour_table):
                 continue
 
             if _uart.any():
-                raw = _uart.readline()
-                if not raw:
-                    await asyncio.sleep_ms(20)
-                    continue
+                chunk = _uart.read(_uart.any())
+                if chunk:
+                    _rx_buf += chunk
 
-                try:
-                    text = raw.decode("utf-8", "ignore")
-                except Exception:
-                    text = str(raw)
+                    # Match lora_uart_bridge.py behavior: parse complete newline-delimited lines.
+                    while b"\n" in _rx_buf:
+                        line, _rx_buf = _rx_buf.split(b"\n", 1)
+                        line = line.strip()
+                        if not line:
+                            continue
 
-                parsed = _parse_line(text)
-                if not parsed:
-                    await asyncio.sleep_ms(20)
-                    continue
+                        try:
+                            text = line.decode("utf-8", "ignore")
+                        except Exception:
+                            text = str(line)
 
-                if parsed["type"] == "LORA_STATUS":
-                    logger.debug(TAG, "Bridge status: {}".format(parsed["line"]))
-                elif parsed["type"] == "LORA_ERR":
-                    logger.warn(TAG, "Bridge error: {}".format(parsed["line"]))
-                elif parsed["type"] == "LORA_RX":
-                    payload = parsed["payload"]
-                    hello = parse_hello(payload)
-                    if hello:
-                        neighbour_table.update(
-                            hello["node_id"],
-                            protocols=["LoRa"],
-                            rssi=parsed["rssi"],
-                            capabilities=hello.get("capabilities", ["LoRa"]),
-                        )
-                    else:
-                        pkt = translate_lora_payload(
-                            payload,
-                            source_id=_extract_source_id(payload),
-                        )
-                        if pkt:
-                            ingress_queue.push(
-                                pkt.get("priority", packet.PRIORITY_NORMAL),
-                                pkt,
-                            )
-                else:
-                    logger.debug(TAG, "Unrecognized bridge line: {}".format(parsed["line"]))
+                        logger.info(TAG, "UART RX: {}".format(text))
+
+                        parsed = _parse_line(text)
+                        if not parsed:
+                            continue
+
+                        if parsed["type"] == "LORA_STATUS":
+                            logger.debug(TAG, "Bridge status: {}".format(parsed["line"]))
+                        elif parsed["type"] == "LORA_ERR":
+                            logger.warn(TAG, "Bridge error: {}".format(parsed["line"]))
+                        elif parsed["type"] == "LORA_RX":
+                            payload = parsed["payload"]
+                            # Use the explicit node field when present (JSON format), else
+                            # fall back to extracting source_id from the payload body.
+                            source_id = parsed.get("node") or _extract_source_id(payload)
+
+                            # For simple endpoint nodes (e.g., DHT sender) that don't emit hello,
+                            # treat inbound data as proof of neighbour presence.
+                            if source_id and source_id != "lora_uart":
+                                neighbour_table.update(
+                                    source_id,
+                                    protocols=["LoRa"],
+                                    rssi=parsed.get("rssi", 0),
+                                    capabilities=["LoRa"],
+                                )
+
+                            hello = parse_hello(payload)
+                            if hello:
+                                neighbour_table.update(
+                                    hello["node_id"],
+                                    protocols=["LoRa"],
+                                    rssi=parsed["rssi"],
+                                    capabilities=hello.get("capabilities", ["LoRa"]),
+                                )
+                            else:
+                                pkt = translate_lora_payload(
+                                    payload,
+                                    source_id=source_id,
+                                )
+                                if pkt:
+                                    ingress_queue.push(
+                                        pkt.get("priority", packet.PRIORITY_NORMAL),
+                                        pkt,
+                                    )
+                        else:
+                            logger.debug(TAG, "Unrecognized bridge line: {}".format(parsed["line"]))
 
         except Exception as e:
             logger.error(TAG, "RX error: {}".format(e))

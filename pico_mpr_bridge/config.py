@@ -6,8 +6,8 @@ NODE_ROLE       = "bridge"          # "bridge" | "sensor" | "dashboard"
 CAPABILITIES    = ["LoRa", "BLE", "WiFi", "MQTT"]
 
 # WiFi credentials
-WIFI_SSID       = "Gigachad hotspot"
-WIFI_PASSWORD   = "95610309"
+WIFI_SSID       = "WJ"
+WIFI_PASSWORD   = "Weejer18"
 
 # MQTT broker
 MQTT_BROKER     = "192.168.1.100"
@@ -19,6 +19,8 @@ MQTT_KEEPALIVE  = 60
 # Discovery
 HELLO_INTERVAL  = 15                # seconds between Hello broadcasts
 HELLO_TIMEOUT   = 45                # 3x interval -> declare neighbour dead
+ENABLE_LORA_HELLO = False           # Sender endpoints may not consume hello frames
+ENABLE_WIFI_HELLO = True            # Keep MQTT/wifi topology discovery enabled
 
 # Cost model (cross-protocol translation costs)
 COST_NATIVE     = 1                 # LoRa->LoRa, WiFi->WiFi, BLE->BLE
@@ -47,10 +49,11 @@ LORA_SYNC_WORD  = 0x12             # Project-wide sync word
 LORA_TX_POWER   = 14               # dBm
 
 # LoRa over UART bridge parameters (Maker UNO + LoRa shield)
-UART_LORA_ID         = 1
-UART_LORA_BAUD       = 57600
-UART_LORA_TX_PIN     = 4
-UART_LORA_RX_PIN     = 5
+# GP0 = UART0 TX, GP1 = UART0 RX  (matches lora_uart_bridge.py wiring)
+UART_LORA_ID         = 0
+UART_LORA_BAUD       = 9600
+UART_LORA_TX_PIN     = 0           # GP0
+UART_LORA_RX_PIN     = 1           # GP1
 UART_LORA_TIMEOUT_MS = 100
 
 # LoRa over I2C bridge parameters (Maker UNO + LoRa shield)

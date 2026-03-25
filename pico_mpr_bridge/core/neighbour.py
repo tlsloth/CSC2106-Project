@@ -115,6 +115,7 @@ def parse_hello(data):
         msg = json.loads(data)
         if msg.get("type") == "hello" and "node_id" in msg:
             return msg
-    except (ValueError, KeyError) as e:
-        logger.warn(TAG, "Failed to parse hello: {}".format(e))
+    except (ValueError, KeyError):
+        # Non-hello payloads are expected on this path.
+        pass
     return None

@@ -36,7 +36,7 @@
 // ACK behavior controls:
 // - Set REQUIRE_ACK to false to treat send as fire-and-forget.
 // - Keep DEBUG_ACK enabled while validating receiver ACK format.
-#define REQUIRE_ACK true
+#define REQUIRE_ACK false
 #define DEBUG_ACK   true
 
 struct Packet {

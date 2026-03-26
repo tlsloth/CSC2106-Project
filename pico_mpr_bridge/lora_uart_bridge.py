@@ -3,12 +3,27 @@ import utime
 import network
 import ujson
 
+try:
+    from umqtt.robust import MQTTClient
+except ImportError:
+    from umqtt.simple import MQTTClient
+
 # ── UART Config (GP0=TX, GP1=RX) ─────────────────────────────────
 uart = UART(0, baudrate=9600, tx=Pin(0), rx=Pin(1))
 
 # ── WiFi Config ───────────────────────────────────────────────────
 WIFI_SSID     = "WJ"
 WIFI_PASSWORD = "Weejer18"
+
+# ── MQTT Config ───────────────────────────────────────────────────
+MQTT_BROKER   = "192.168.1.100"
+MQTT_PORT     = 1883
+MQTT_USER     = ""
+MQTT_PASSWORD = ""
+MQTT_CLIENT_ID = "pico_uart_bridge"
+MQTT_TOPIC_DATA = "mesh/data/{node}"
+
+mqtt_client = None
 
 # ── WiFi Connect ──────────────────────────────────────────────────
 def wifi_connect():
@@ -26,6 +41,51 @@ def wifi_connect():
         utime.sleep_ms(500)
     print("WiFi failed")
     return False
+
+
+# ── MQTT Connect / Publish ────────────────────────────────────────
+def mqtt_connect():
+    global mqtt_client
+    try:
+        mqtt_client = MQTTClient(
+            MQTT_CLIENT_ID,
+            MQTT_BROKER,
+            port=MQTT_PORT,
+            user=MQTT_USER or None,
+            password=MQTT_PASSWORD or None,
+            keepalive=60,
+        )
+        mqtt_client.connect()
+        print("MQTT connected:", MQTT_BROKER, MQTT_PORT)
+        return True
+    except Exception as e:
+        mqtt_client = None
+        print("MQTT connect failed:", e)
+        return False
+
+
+def mqtt_publish(node, payload_str):
+    global mqtt_client
+    if mqtt_client is None:
+        return False
+
+    topic = MQTT_TOPIC_DATA.format(node=node)
+    try:
+        mqtt_client.publish(topic.encode("utf-8"), payload_str.encode("utf-8"))
+        print("MQTT TX:", topic, payload_str)
+        return True
+    except Exception as e:
+        print("MQTT publish failed:", e)
+        # Try one reconnect and one retry
+        if not mqtt_connect():
+            return False
+        try:
+            mqtt_client.publish(topic.encode("utf-8"), payload_str.encode("utf-8"))
+            print("MQTT TX(retry):", topic, payload_str)
+            return True
+        except Exception as e2:
+            print("MQTT retry failed:", e2)
+            return False
 
 # ── JSON Translation ──────────────────────────────────────────────
 def translate_to_json(raw, node, rssi):
@@ -48,10 +108,8 @@ def process_line(line):
         json_str = translate_to_json(raw, node, rssi)
         print("JSON:", json_str)
 
-        # ── Step 4: MQTT publish here ─────────────────────────────
-        # mqtt_publish(json_str)
-        # ── Step 5: CoAP publish here ─────────────────────────────
-        # coap_publish(json_str)
+        if not mqtt_publish(node, json_str):
+            print("MQTT skipped or failed for node", node)
 
     except Exception as e:
         print("Parse error:", e, "| Line:", line)
@@ -60,8 +118,11 @@ def process_line(line):
 def main():
     print("\n=== Pico W UART Bridge ===")
 
-    if not wifi_connect():
+    wifi_ok = wifi_connect()
+    if not wifi_ok:
         print("No WiFi — continuing without network")
+    else:
+        mqtt_connect()
 
     print("Listening on UART (GP0/GP1)...\n")
     buf = b''

@@ -6,11 +6,13 @@ NODE_ROLE       = "bridge"          # "bridge" | "sensor" | "dashboard"
 CAPABILITIES    = ["LoRa", "BLE", "WiFi", "MQTT"]
 
 # WiFi credentials
-WIFI_SSID       = "WJ"
-WIFI_PASSWORD   = "Weejer18"
+WIFI_SSID       = "SINGTEL-93KM"
+WIFI_PASSWORD   = "fddxftv82d"
+WIFI_CONNECT_ATTEMPTS = 3          # Retry association attempts before failing startup
+WIFI_CONNECT_TIMEOUT_S = 20         # Per-attempt connect timeout in seconds
 
 # MQTT broker
-MQTT_BROKER     = "192.168.1.100"
+MQTT_BROKER     = "192.168.1.9"
 MQTT_PORT       = 1883
 MQTT_USER       = ""
 MQTT_PASSWORD   = ""
@@ -38,6 +40,9 @@ MQTT_ALERT_TOPIC    = "mesh/alert/{node_id}"
 MQTT_TOPO_TOPIC     = "mesh/topology/{node_id}"
 MQTT_CMD_TOPIC      = "mesh/cmd/{node_id}"
 MQTT_HELLO_TOPIC    = "mesh/hello"
+MQTT_TOPIC_LATEST   = "mesh/latest/{node_id}"  # Legacy dashboard compatibility
+ENABLE_UART_BRIDGE_COMPAT = True                # Publish legacy mesh/data + mesh/latest payload shape
+UART_BRIDGE_COMPAT_KEEP_STANDARD = False        # For legacy dashboards, prefer node/T/H/rssi payload on mesh/data
 
 # LoRa parameters (SX1276 / RFM95W)
 LORA_TRANSPORT  = "UART"          # "SPI" direct Pico, "I2C" bridge, "UART" bridge

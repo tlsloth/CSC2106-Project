@@ -32,11 +32,69 @@ def translate_to_mqtt(pkt):
         "data": payload,
     }
 
+    publishes = []
     try:
-        return (topic, json.dumps(mqtt_msg))
+        standard_payload = json.dumps(mqtt_msg)
+        if getattr(config, "UART_BRIDGE_COMPAT_KEEP_STANDARD", True):
+            publishes.append((topic, standard_payload, False))
+
+        if getattr(config, "ENABLE_UART_BRIDGE_COMPAT", False):
+            compat = _build_uart_bridge_compat_publish(pkt)
+            if compat:
+                publishes.extend(compat)
+
+        if not publishes:
+            publishes.append((topic, standard_payload, False))
+
+        # Backward compatible return for existing callers.
+        if len(publishes) == 1:
+            one = publishes[0]
+            return (one[0], one[1], one[2])
+        return publishes
     except Exception as e:
         logger.error(TAG, "Failed to build MQTT message: {}".format(e))
         return None
+
+
+def _build_uart_bridge_compat_publish(pkt):
+    """Build legacy UART bridge MQTT publishes used by existing dashboards.
+
+    Returns list of publish tuples: (topic, payload_str, retain_bool)
+    or [] if packet does not match DHT-like telemetry.
+    """
+    src = str(pkt.get("src", "unknown"))
+    payload = pkt.get("payload", {})
+
+    if not isinstance(payload, dict):
+        return []
+
+    temp = payload.get("T")
+    if temp is None:
+        temp = payload.get("temp", payload.get("temperature"))
+
+    hum = payload.get("H")
+    if hum is None:
+        hum = payload.get("humidity", payload.get("hum"))
+
+    # Only apply legacy shape for temperature/humidity sensor telemetry.
+    if temp is None and hum is None:
+        return []
+
+    legacy = {
+        "node": src,
+        "T": temp,
+        "H": hum,
+        "rssi": pkt.get("rssi", payload.get("rssi", 0)),
+    }
+
+    legacy_payload = json.dumps(legacy)
+    topic_data = config.MQTT_DATA_TOPIC.format(node_id=src)
+    topic_latest = config.MQTT_TOPIC_LATEST.format(node_id=src)
+
+    return [
+        (topic_data, legacy_payload, False),
+        (topic_latest, legacy_payload, True),
+    ]
 
 
 def translate_from_mqtt(topic, msg_bytes):
@@ -121,6 +179,7 @@ def translate_lora_payload(raw_data, source_id="unknown"):
     return packet.create_packet(
         src=source_id,
         dst="dashboard",
+        hop_dst=config.NODE_ID,
         payload=payload,
         priority=priority,
     )
@@ -149,6 +208,7 @@ def translate_ble_payload(raw_bytes, source_id="unknown"):
         return packet.create_packet(
             src=source_id,
             dst="dashboard",
+            hop_dst=config.NODE_ID,
             payload=payload,
             priority=priority,
         )

@@ -191,6 +191,68 @@ def _now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _parse_csv_sensor(text):
+  """Parse strings like 'T:25.3,H:60.5' into numeric values."""
+  if not isinstance(text, str):
+    return None, None
+
+  temp = None
+  hum = None
+  try:
+    for item in text.split(","):
+      if ":" not in item:
+        continue
+      key, value = item.split(":", 1)
+      key = key.strip().upper()
+      num = float(value.strip())
+      if key in ("T", "TEMP", "TEMPERATURE"):
+        temp = num
+      elif key in ("H", "HUM", "HUMIDITY"):
+        hum = num
+  except Exception:
+    return None, None
+
+  return temp, hum
+
+
+def _extract_dashboard_fields(topic, data):
+  """Support legacy UART, standard MPR, and raw sensor string payloads."""
+  node = _topic_node(topic, data.get("node") or data.get("src"))
+
+  # 1) Legacy shape: {"node":"A","T":..,"H":..,"rssi":..}
+  temp = data.get("T")
+  hum = data.get("H")
+  rssi = data.get("rssi")
+
+  # 2) Standard shape: {"src":"A","data":{"temp":..,"humidity":..}}
+  payload = data.get("data") if isinstance(data.get("data"), dict) else None
+  if payload is not None:
+    if temp is None:
+      temp = payload.get("T", payload.get("temp", payload.get("temperature")))
+    if hum is None:
+      hum = payload.get("H", payload.get("humidity", payload.get("hum")))
+    if rssi is None:
+      rssi = payload.get("rssi")
+
+    # 3) Raw sensor text inside standard payload: {"data":{"raw":"T:25.3,H:60.5"}}
+    if (temp is None or hum is None) and isinstance(payload.get("raw"), str):
+      parsed_t, parsed_h = _parse_csv_sensor(payload.get("raw"))
+      if temp is None:
+        temp = parsed_t
+      if hum is None:
+        hum = parsed_h
+
+  # 4) Raw sensor text as top-level fallback: {"raw":"T:25.3,H:60.5"}
+  if (temp is None or hum is None) and isinstance(data.get("raw"), str):
+    parsed_t, parsed_h = _parse_csv_sensor(data.get("raw"))
+    if temp is None:
+      temp = parsed_t
+    if hum is None:
+      hum = parsed_h
+
+  return node, temp, hum, rssi
+
+
 def on_connect(client, userdata, flags, rc):
     global _mqtt_connected
     print("MQTT connect rc=", rc)
@@ -221,12 +283,12 @@ def on_message(client, userdata, msg):
         print("Skipping non-JSON payload from", topic)
         return
 
-    node = _topic_node(topic, data.get("node"))
+    node, temp, hum, rssi = _extract_dashboard_fields(topic, data)
     row = {
         "node": node,
-        "T": data.get("T"),
-        "H": data.get("H"),
-        "rssi": data.get("rssi"),
+      "T": temp,
+      "H": hum,
+      "rssi": rssi,
         "topic": topic,
         "updated_at": _now_text(),
     }

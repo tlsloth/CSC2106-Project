@@ -13,6 +13,22 @@ _wlan = None
 _mqtt = None
 
 
+def _wifi_status_text(status):
+    # MicroPython status values vary slightly by port; keep a safe fallback.
+    mapping = {
+        0: "STAT_IDLE",
+        1: "STAT_CONNECTING",
+        2: "STAT_WRONG_PASSWORD",
+        3: "STAT_NO_AP_FOUND",
+        4: "STAT_CONNECT_FAIL",
+        5: "STAT_GOT_IP",
+        -1: "STAT_CONNECT_FAIL",
+        -2: "STAT_NO_AP_FOUND",
+        -3: "STAT_WRONG_PASSWORD",
+    }
+    return mapping.get(status, str(status))
+
+
 def init():
     """Connect to WiFi and initialise MQTT client."""
     global _wlan, _mqtt
@@ -24,20 +40,44 @@ def init():
         _wlan.active(True)
 
         if not _wlan.isconnected():
-            logger.info(TAG, "Connecting to WiFi '{}'...".format(config.WIFI_SSID))
-            _wlan.connect(config.WIFI_SSID, config.WIFI_PASSWORD)
+            attempts = int(getattr(config, "WIFI_CONNECT_ATTEMPTS", 3) or 3)
+            timeout_s = int(getattr(config, "WIFI_CONNECT_TIMEOUT_S", 20) or 20)
 
-            # Wait for connection with timeout
-            timeout = 20
-            while not _wlan.isconnected() and timeout > 0:
+            for attempt in range(1, attempts + 1):
+                logger.info(
+                    TAG,
+                    "Connecting to WiFi '{}' (attempt {}/{})...".format(
+                        config.WIFI_SSID,
+                        attempt,
+                        attempts,
+                    ),
+                )
+
+                try:
+                    _wlan.disconnect()
+                except Exception:
+                    pass
+
+                _wlan.connect(config.WIFI_SSID, config.WIFI_PASSWORD)
+
+                timeout = timeout_s
+                while not _wlan.isconnected() and timeout > 0:
+                    time.sleep(1)
+                    timeout -= 1
+
+                if _wlan.isconnected():
+                    break
+
+                status = _wifi_status_text(_wlan.status())
+                logger.warn(TAG, "WiFi attempt {} failed (status={})".format(attempt, status))
                 time.sleep(1)
-                timeout -= 1
 
         if _wlan.isconnected():
             ip = _wlan.ifconfig()[0]
             logger.info(TAG, "WiFi connected, IP: {}".format(ip))
         else:
-            logger.error(TAG, "WiFi connection failed")
+            status = _wifi_status_text(_wlan.status())
+            logger.error(TAG, "WiFi connection failed (status={})".format(status))
             return False
 
     except Exception as e:
@@ -73,7 +113,7 @@ def is_available():
     return _wlan is not None and _wlan.isconnected() and _mqtt is not None
 
 
-def mqtt_publish(topic, message):
+def mqtt_publish(topic, message, retain=False):
     """Publish a message to an MQTT topic."""
     if _mqtt is None:
         logger.warn(TAG, "MQTT not available, cannot publish")
@@ -81,8 +121,11 @@ def mqtt_publish(topic, message):
     try:
         if isinstance(message, str):
             message = message.encode("utf-8")
-        _mqtt.publish(topic.encode("utf-8"), message)
-        logger.debug(TAG, "Published to {}: {} bytes".format(topic, len(message)))
+        _mqtt.publish(topic.encode("utf-8"), message, retain=retain)
+        logger.debug(
+            TAG,
+            "Published to {}: {} bytes (retain={})".format(topic, len(message), retain),
+        )
         return True
     except Exception as e:
         logger.error(TAG, "MQTT publish error: {}".format(e))
@@ -129,8 +172,19 @@ async def tx_task(egress_queue):
                 if pkt:
                     result = translate_to_mqtt(pkt)
                     if result:
-                        topic, payload_str = result
-                        mqtt_publish(topic, payload_str)
+                        # Support single publish tuple and multi-publish list.
+                        if isinstance(result, list):
+                            for item in result:
+                                if isinstance(item, tuple):
+                                    topic = item[0]
+                                    payload_str = item[1]
+                                    retain = item[2] if len(item) > 2 else False
+                                    mqtt_publish(topic, payload_str, retain=retain)
+                        elif isinstance(result, tuple):
+                            topic = result[0]
+                            payload_str = result[1]
+                            retain = result[2] if len(result) > 2 else False
+                            mqtt_publish(topic, payload_str, retain=retain)
         except Exception as e:
             logger.error(TAG, "TX error: {}".format(e))
 

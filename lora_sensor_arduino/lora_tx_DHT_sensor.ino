@@ -27,6 +27,7 @@
 // ============== PROTOCOL CONFIG ==============
 #define MAX_RETRIES   3
 #define ACK_TIMEOUT   3000
+#define ACK_RX_GUARD_MS 15
 #define MSG_TYPE_DATA 0x01
 #define MSG_TYPE_ACK  0x02
 #define PACKET_START  0xCB
@@ -36,7 +37,7 @@
 // ACK behavior controls:
 // - Set REQUIRE_ACK to false to treat send as fire-and-forget.
 // - Keep DEBUG_ACK enabled while validating receiver ACK format.
-#define REQUIRE_ACK false
+#define REQUIRE_ACK true
 #define DEBUG_ACK   true
 
 struct Packet {
@@ -161,6 +162,24 @@ bool isAckForTx(const Packet* ackPkt, const Packet* txPkt, uint8_t expectedFrom)
           ackPkt->seq  == txPkt->seq);
 }
 
+void flushRxQueue(unsigned long maxMs) {
+  unsigned long start = millis();
+  uint8_t junk[50];
+  uint8_t junkLen = sizeof(junk);
+
+  while ((millis() - start) < maxMs) {
+    if (!rf95.available()) break;
+    junkLen = sizeof(junk);
+    if (!rf95.recv(junk, &junkLen)) break;
+
+    if (DEBUG_ACK) {
+      Serial.print(F("Flushed stale RX frame len="));
+      Serial.println(junkLen);
+    }
+    delay(2);
+  }
+}
+
 // ============== SEND WITH RETRY ==============
 bool sendWithRetry(uint8_t targetId, const char* message) {
   Packet txPacket;
@@ -178,8 +197,15 @@ bool sendWithRetry(uint8_t targetId, const char* message) {
     Serial.print(F("/"));
     Serial.println(MAX_RETRIES);
 
+    // Clear any stale frame from previous attempts before sending this packet.
+    flushRxQueue(30);
+
     rf95.send(buffer, len);
     rf95.waitPacketSent();
+
+    // Give the radio a brief guard time to re-enter RX before ACK is sent back.
+    rf95.setModeRx();
+    delay(ACK_RX_GUARD_MS);
 
     if (!REQUIRE_ACK) {
       Serial.println(F("ACK disabled: treating as delivered"));
@@ -187,11 +213,17 @@ bool sendWithRetry(uint8_t targetId, const char* message) {
       return true;
     }
 
-    uint8_t recvBuf[50];
-    uint8_t recvLen = sizeof(recvBuf);
+    bool ackMatched = false;
+    unsigned long ackStart = millis();
+    while ((millis() - ackStart) < ACK_TIMEOUT) {
+      uint16_t remaining = ACK_TIMEOUT - (uint16_t)(millis() - ackStart);
+      if (rf95.waitAvailableTimeout(remaining)) {
+        uint8_t recvBuf[50];
+        uint8_t recvLen = sizeof(recvBuf);
+        if (!rf95.recv(recvBuf, &recvLen)) {
+          continue;
+        }
 
-    if (rf95.waitAvailableTimeout(ACK_TIMEOUT)) {
-      if (rf95.recv(recvBuf, &recvLen)) {
         if (DEBUG_ACK) {
           Serial.print(F("RX candidate len="));
           Serial.print(recvLen);
@@ -212,18 +244,29 @@ bool sendWithRetry(uint8_t targetId, const char* message) {
           }
 
           if (isAckForTx(&ackPkt, &txPacket, targetId)) {
-            Serial.println(F("ACK OK!"));
-            sequenceNum++;
-            return true;
-          } else if (DEBUG_ACK) {
+            ackMatched = true;
+            break;
+          }
+
+          if (DEBUG_ACK) {
             Serial.println(F("ACK parsed but does not match this TX (from/to/type/seq mismatch)"));
           }
         } else if (DEBUG_ACK) {
           Serial.println(F("RX frame is not valid custom ACK packet format"));
         }
+      } else {
+        break;
       }
-    } else if (DEBUG_ACK) {
-      Serial.println(F("ACK wait timeout: no RX available"));
+    }
+
+    if (ackMatched) {
+      Serial.println(F("ACK OK!"));
+      sequenceNum++;
+      return true;
+    }
+
+    if (DEBUG_ACK) {
+      Serial.println(F("ACK wait timeout: no matching ACK"));
     }
     Serial.println(F("No ACK, retrying..."));
     delay(200 + random(200));

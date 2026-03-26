@@ -132,8 +132,16 @@ def main():
                     dst = pkt.get("dst", "dashboard")
                     src = pkt.get("src", "unknown")
 
-                    # If this packet is for us (the bridge), process/forward
-                    if pkt.get("hop_dst") and pkt["hop_dst"] != config.NODE_ID:
+                    # Only drop transit packets that are explicitly for a different hop.
+                    # Dashboard-bound telemetry is always consumed by this bridge for MQTT publish,
+                    # even if hop_dst is set by a simple endpoint sender.
+                    is_dashboard_bound = (dst == "dashboard")
+                    if (
+                        pkt.get("src") != config.NODE_ID
+                        and pkt.get("hop_dst")
+                        and pkt["hop_dst"] != config.NODE_ID
+                        and not is_dashboard_bound
+                    ):
                         # Not for us — drop or forward
                         logger.debug(TAG, "Packet not addressed to us, skipping")
                         await asyncio.sleep_ms(10)
@@ -214,7 +222,12 @@ def main():
         tasks.append(asyncio.create_task(watchdog_task()))
 
         # Interface-specific tasks
-        if lora_ok:
+        should_run_lora_tasks = bool(lora_ok)
+        if (not should_run_lora_tasks) and lora_module is not None and lora_transport in ("UART", "I2C"):
+            # UART/I2C bridge interfaces can recover from transient init failures at runtime.
+            should_run_lora_tasks = True
+
+        if should_run_lora_tasks:
             tasks.append(asyncio.create_task(
                 lora_module.rx_task(ingress_queue, neighbour_table)))
             tasks.append(asyncio.create_task(

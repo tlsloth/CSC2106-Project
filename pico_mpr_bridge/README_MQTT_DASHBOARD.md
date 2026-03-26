@@ -1,211 +1,218 @@
-# Mosquitto + Dashboard Setup Guide
+# MQTT Setup Guide (New User, End-to-End)
 
-This guide documents the exact setup used in this project for:
+This guide tells you exactly which files to run on each device and in what order.
 
-- Arduino LoRa DHT sender -> Uno LoRa UART bridge
-- Pico W bridge publisher -> Mosquitto
-- Endpoint subscriber (MicroPython)
-- Python web dashboard (Flask + Paho MQTT)
+## 1. What You Are Building
 
-## 1. Data Flow
+Data path:
 
-1. `lora_tx_DHT_sensor.ino` sends LoRa sensor payload (e.g. `T:31.0,H:66.3`)
-2. `maker_uno_lora_uart_bridge.ino` receives and forwards over UART JSON
-3. `lora_uart_bridge.py` on bridge Pico W publishes to MQTT:
-   - Live topic: `mesh/data/{node}`
-   - Retained topic: `mesh/latest/{node}`
-4. Endpoint clients/dashboard subscribe to:
-   - `mesh/data/+`
-   - `mesh/latest/+`
+1. Arduino sensor sends LoRa payload (example: T:31.0,H:66.3)
+2. Arduino UNO LoRa-UART bridge receives LoRa, sends JSON over UART to Pico W
+3. Pico W bridge runs MPR app, publishes to Mosquitto
+4. Dashboard app reads MQTT and shows node values
 
-## 2. Mosquitto Host Requirements (Windows)
+## 2. File Selection (Use These Files)
 
-Use the PC that runs Mosquitto as broker host.
+### Arduino sensor node (transmitter)
 
-### 2.1 Find broker IP
+- lora_sensor_arduino/lora_tx_DHT_sensor.ino
 
-Run:
+### Arduino UNO LoRa-UART bridge (receiver + ACK + UART forward)
+
+- lora_sensor_arduino/maker_uno_lora_uart_bridge.ino
+
+### Pico W bridge (recommended app path)
+
+- pico_mpr_bridge/main.py
+- pico_mpr_bridge/config.py
+- pico_mpr_bridge/core/*
+- pico_mpr_bridge/interfaces/*
+- pico_mpr_bridge/utils/*
+- pico_mpr_bridge/lib/umqtt/* and pico_mpr_bridge/lib/aioble/* as needed
+
+### Optional Pico W MQTT serial subscriber (debug only)
+
+- pico_mpr_bridge/mqtt_endpoint.py
+
+### PC web dashboard
+
+- pico_mpr_bridge/python_dashboard.py
+- pico_mpr_bridge/requirements-dashboard.txt
+
+Important:
+
+- Do not run pico_mpr_bridge/lora_uart_bridge.py together with pico_mpr_bridge/main.py on the same Pico. Choose one runtime path.
+- Recommended runtime path is main.py.
+
+## 3. Network and Broker Setup (Windows)
+
+Run on the Mosquitto host PC.
+
+### 3.1 Find broker IP
 
 ```powershell
 ipconfig
 ```
 
-Use the active adapter IPv4, e.g. `192.168.1.9`.
+Use the active adapter IPv4, for example 192.168.1.9.
 
-### 2.2 Configure mosquitto.conf
-
-Use settings that allow LAN clients:
+### 3.2 Configure mosquitto.conf (just add on any line)
 
 ```conf
 listener 1883 0.0.0.0
 allow_anonymous true
-# optional, default allows all:
-# accept_protocol_versions 3,4,5
 ```
 
-### 2.3 Verify listening address
-
-Run:
+### 3.3 Verify listener
 
 ```powershell
 Get-NetTCPConnection -LocalPort 1883 -State Listen | Select-Object LocalAddress, LocalPort, OwningProcess
 ```
 
-Expected `LocalAddress`:
+Expected LocalAddress is 0.0.0.0 or LAN IPv4, not only 127.0.0.1.
 
-- `0.0.0.0` (good), or
-- your LAN IP (good)
-
-Not acceptable for Pico clients:
-
-- `127.0.0.1` only
-
-### 2.4 Open firewall port
-
-Run as Administrator:
+### 3.4 Open firewall
 
 ```powershell
 New-NetFirewallRule -DisplayName "Mosquitto 1883 Inbound" -Direction Inbound -Protocol TCP -LocalPort 1883 -Action Allow -Profile Any
 ```
 
-### 2.5 Reachability test from another machine
+### 3.5 Connectivity check
 
 ```powershell
 Test-NetConnection -ComputerName 192.168.1.9 -Port 1883
 ```
 
-Expected: `TcpTestSucceeded : True`.
+Expected: TcpTestSucceeded : True
 
-## 3. Project Files and Roles
+## 4. Arduino Setup
 
-- `pico_mpr_bridge/lora_uart_bridge.py`
-  - Bridge Pico W script
-  - Reads UART JSON and publishes MQTT live + retained
+### 4.1 Upload sender sketch
 
-- `pico_mpr_bridge/mqtt_endpoint.py`
-  - Endpoint Pico W subscriber script (serial text dashboard)
+1. Open lora_sensor_arduino/lora_tx_DHT_sensor.ino
+2. Select board and COM port
+3. Upload
+4. Open serial monitor at 9600
 
-- `pico_mpr_bridge/python_dashboard.py`
-  - PC-hosted web dashboard (Flask)
+Expected sender logs include:
 
-- `pico_mpr_bridge/requirements-dashboard.txt`
-  - Python dependencies for web dashboard
+- Sending: T:xx.x,H:yy.y
+- Attempt 1/3
+- ACK OK! (ideal)
 
-## 4. Bridge Pico W Setup (Publisher)
+### 4.2 Upload UNO LoRa-UART bridge sketch
 
-In `pico_mpr_bridge/lora_uart_bridge.py`, set:
+1. Open lora_sensor_arduino/maker_uno_lora_uart_bridge.ino
+2. Select board and COM port
+3. Upload
+4. Open serial monitor at 9600
 
-- `WIFI_SSID`
-- `WIFI_PASSWORD`
-- `MQTT_BROKER` (broker host LAN IP, e.g. `192.168.1.9`)
-- `MQTT_PORT` (`1883`)
+Expected bridge logs include:
 
-Expected bridge serial logs:
+- Ready - listening for LoRa...
+- ACK sent
+- Forwarded: {"raw":"T:..,H:..","node":"A","rssi":...}
 
-- `MQTT connected: ...`
-- `MQTT TX: mesh/data/A ...`
-- `MQTT TX(retained): mesh/latest/A ...`
+## 5. Pico W Bridge Setup (main.py path)
 
-## 5. Endpoint Pico W Setup (Subscriber)
+### 5.1 Update config
 
-In `pico_mpr_bridge/mqtt_endpoint.py`, set:
+Edit pico_mpr_bridge/config.py:
 
-- `WIFI_SSID`
-- `WIFI_PASSWORD`
-- `MQTT_BROKER`
-- `MQTT_PORT`
+- WIFI_SSID
+- WIFI_PASSWORD
+- MQTT_BROKER (PC broker IPv4)
+- MQTT_PORT
+- LORA_TRANSPORT = "UART"
+- UART_LORA_ID / UART_LORA_TX_PIN / UART_LORA_RX_PIN
 
-Expected endpoint logs:
+### 5.2 Upload files to Pico W
 
-- `MQTT connected: ...`
-- `Subscribed to: mesh/data/+`
-- `Subscribed to: mesh/latest/+`
-- `MQTT RX: mesh/latest/A`
-- `Parsed : node=A, T=..., H=..., rssi=...`
+Upload the whole pico_mpr_bridge folder content needed by main.py.
 
-## 6. Python Web Dashboard Setup
+### 5.3 Run and verify
 
-From project root:
+Reset Pico W (main.py auto-runs).
+
+Expected serial logs include:
+
+- Interfaces — LoRa(UART):OK ...
+- LoRa-over-UART RX task started
+- UART RX: {"raw":"T:..,H:..","node":"A","rssi":...}
+- Published to mesh/data/A ...
+
+## 6. PC Dashboard Setup
+
+From repository root:
 
 ```powershell
 pip install -r pico_mpr_bridge/requirements-dashboard.txt
 python pico_mpr_bridge/python_dashboard.py
 ```
 
-Open browser:
+Open:
 
-- `http://localhost:5050`
+- http://localhost:5050
 
-Health endpoint:
+Useful APIs:
 
-- `http://localhost:5050/api/health`
+- http://localhost:5050/api/health
+- http://localhost:5050/api/nodes
 
-Nodes data endpoint:
+## 7. MQTT Topics Used
 
-- `http://localhost:5050/api/nodes`
+Published by bridge:
 
-## 7. Dashboard Time Fields
+- mesh/data/{node_id}
+- mesh/latest/{node_id} (retained)
 
-- `Last refresh`:
-  - Browser polling time (UI fetch cycle)
-  - Changes every polling interval
+Subscribed by dashboard:
 
-- `Last update`:
-  - Time dashboard backend received latest MQTT message for that node
-  - Changes only when new message arrives
+- mesh/data/+
+- mesh/latest/+
 
-## 8. Common Errors and Fixes
+## 8. Message Format Notes
 
-### Error: `Broker TCP check failed: [Errno 110] ETIMEDOUT`
+The dashboard now supports all of these payload styles:
 
-Cause:
+1. Legacy format
 
-- Broker not reachable from client
+```json
+{"node":"A","T":31.2,"H":65.0,"rssi":-45}
+```
 
-Fix:
+2. Standard MPR format
 
-1. Verify broker IP in scripts
-2. Ensure Mosquitto listens on `0.0.0.0:1883`
-3. Open firewall TCP 1883
-4. Verify with `Test-NetConnection`
+```json
+{"src":"A","dst":"dashboard","data":{"temp":31.2,"humidity":65.0}}
+```
 
-### Error: `MQTT skipped or failed for node A`
+3. Raw sensor text wrapped in JSON
 
-Cause:
+```json
+{"src":"A","data":{"raw":"T:31.2,H:65.0"}}
+```
 
-- Bridge publish path had no active client or reconnect issue
+## 9. ACK vs MQTT Clarification
 
-Fix:
+- ACK is sender-side confirmation and can fail independently.
+- MQTT update can still succeed even if sender reports ACK timeout.
+- If you see dashboard updates, the forward path is working.
 
-- Use the updated `lora_uart_bridge.py` with auto-connect/reconnect in publish path
+### Problem: Sender often says no RX available
 
-### Arduino sender shows `ACK wait timeout: no RX available`
+Check:
 
-Cause:
+1. UNO bridge serial shows ACK sent
+2. Sender and bridge frequency and packet format match
+3. Antenna and distance are reasonable
+4. Keep DEBUG_ACK enabled in lora_tx_DHT_sensor.ino while testing
 
-- No ACK returned by receiver; LoRa delivery may fail
+### Problem: Pico cannot publish MQTT
 
-Impact:
+Check:
 
-- No new payload reaches MQTT -> dashboard appears stale
+1. MQTT_BROKER in pico_mpr_bridge/config.py is your active laptop IPv4
+2. Mosquitto bound to 0.0.0.0:1883
+3. Firewall rule for TCP 1883 exists
 
-Quick test:
-
-- Temporarily set `REQUIRE_ACK false` in sender sketch to verify data path
-
-## 9. Final End-to-End Checklist
-
-1. Mosquitto listens on `0.0.0.0:1883`
-2. Broker firewall allows inbound TCP 1883
-3. `Test-NetConnection broker_ip -Port 1883` succeeds from client machines
-4. Bridge Pico prints `MQTT TX` lines
-5. Endpoint Pico receives `mesh/data/+` / `mesh/latest/+`
-6. Web dashboard shows node card updates
-
-## 10. Current Known Good MQTT Topics
-
-- `mesh/data/A` (live)
-- `mesh/latest/A` (retained snapshot)
-- wildcard subscribers:
-  - `mesh/data/+`
-  - `mesh/latest/+`

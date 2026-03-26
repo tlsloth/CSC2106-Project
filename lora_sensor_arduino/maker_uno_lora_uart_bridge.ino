@@ -20,6 +20,10 @@
 #define MSG_TYPE_ACK  0x02
 #define HEADER_SIZE    6
 #define MAX_PAYLOAD   20
+#define ACK_DELAY_MS  40
+// Lab mode: accept DATA packets regardless of destination ID.
+// Set to false for strict destination filtering.
+#define ACCEPT_ANY_DST true
 
 struct Packet {
   uint8_t start;
@@ -80,8 +84,11 @@ void sendAck(Packet *rxPkt) {
     ack.type, ack.seq, ack.len, ack.checksum
   };
 
+  // Delay ACK slightly so sender has time to switch from TX to RX.
+  delay(ACK_DELAY_MS);
   rf95.send(buf, sizeof(buf));
   rf95.waitPacketSent();
+  rf95.setModeRx();
   Serial.println(F("ACK sent"));
 }
 
@@ -123,7 +130,10 @@ void loop() {
       Packet pkt;
 
       if (deserializePacket(buf, len, &pkt)) {
-        if (pkt.type == MSG_TYPE_DATA && (pkt.to == MY_NODE_ID || pkt.to == 0xFF)) {
+        bool forThisBridge = (pkt.to == MY_NODE_ID || pkt.to == 0xFF);
+        bool shouldProcess = (pkt.type == MSG_TYPE_DATA) && (forThisBridge || ACCEPT_ANY_DST);
+
+        if (shouldProcess) {
           sendAck(&pkt);
 
           char raw[MAX_PAYLOAD + 1];
@@ -144,6 +154,10 @@ void loop() {
           picoSerial.println(json);
           Serial.print(F("Forwarded: "));
           Serial.println(json);
+        } else if (pkt.type == MSG_TYPE_DATA) {
+          Serial.print(F("Data packet ignored (dst="));
+          Serial.print((char)pkt.to);
+          Serial.println(F(")"));
         }
       } else {
         Serial.println(F("Bad packet - dropped"));

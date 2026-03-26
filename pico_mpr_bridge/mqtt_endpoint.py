@@ -29,6 +29,37 @@ MQTT_RETRY_SECONDS = 3
 latest_by_node = {}
 
 
+def _node_from_topic(topic_str):
+    parts = topic_str.split("/")
+    if len(parts) >= 3 and parts[2]:
+        return parts[2]
+    return "?"
+
+
+def _extract_fields(data, topic_str):
+    """Support both legacy and standard bridge payload shapes."""
+    # Legacy payload from lora_uart_bridge compatibility:
+    # {"node":"A","T":31.2,"H":65.0,"rssi":-40}
+    node = data.get("node")
+    temp = data.get("T")
+    hum = data.get("H")
+    rssi = data.get("rssi")
+
+    # Standard MPR payload:
+    # {"src":"A","dst":"dashboard","data":{"temp":31.2,"humidity":65.0}, ...}
+    if temp is None and hum is None and isinstance(data.get("data"), dict):
+        payload = data.get("data", {})
+        temp = payload.get("T", payload.get("temp", payload.get("temperature")))
+        hum = payload.get("H", payload.get("humidity", payload.get("hum")))
+        if rssi is None:
+            rssi = payload.get("rssi")
+
+    if not node:
+        node = data.get("src") or _node_from_topic(topic_str)
+
+    return str(node), temp, hum, rssi
+
+
 def wifi_connect():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
@@ -53,10 +84,7 @@ def on_message(topic, msg):
         msg_str = msg.decode("utf-8") if isinstance(msg, (bytes, bytearray)) else str(msg)
         data = ujson.loads(msg_str)
 
-        node = data.get("node", "?")
-        temp = data.get("T", None)
-        hum = data.get("H", None)
-        rssi = data.get("rssi", None)
+        node, temp, hum, rssi = _extract_fields(data, topic_str)
 
         latest_by_node[node] = {
             "T": temp,

@@ -1,4 +1,7 @@
-import json
+try:
+    import ujson as json
+except ImportError:
+    import json
 
 import config
 from core import packet
@@ -43,7 +46,7 @@ def _parse_line(raw_line):
                 "payload": raw.encode("utf-8"),
                 "node": node,
             }
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, TypeError):
             pass
 
     # Pipe-delimited formats from UNO bridge:
@@ -135,11 +138,16 @@ async def rx_task(ingress_queue, neighbour_table):
     while True:
         try:
             if _uart is None:
-                await asyncio.sleep(5)
+                # Allow recovery if UART init fails once at startup.
+                if init():
+                    logger.info(TAG, "UART recovered")
+                else:
+                    await asyncio.sleep(5)
                 continue
 
-            if _uart.any():
-                chunk = _uart.read(_uart.any())
+            available = _uart.any()
+            if available:
+                chunk = _uart.read(available)
                 if chunk:
                     _rx_buf += chunk
 
@@ -195,6 +203,7 @@ async def rx_task(ingress_queue, neighbour_table):
                                     source_id=source_id,
                                 )
                                 if pkt:
+                                    pkt["rssi"] = parsed.get("rssi", 0)
                                     ingress_queue.push(
                                         pkt.get("priority", packet.PRIORITY_NORMAL),
                                         pkt,
@@ -204,6 +213,13 @@ async def rx_task(ingress_queue, neighbour_table):
 
         except Exception as e:
             logger.error(TAG, "RX error: {}".format(e))
+            # Force a clean re-init path on next loop if UART gets wedged.
+            try:
+                if _uart is not None:
+                    _uart.deinit()
+            except Exception:
+                pass
+            _uart = None
 
         await asyncio.sleep_ms(20)
 

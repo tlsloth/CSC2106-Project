@@ -6,6 +6,9 @@ import config
 from utils import logger
 from core import packet
 from core.neighbour import parse_hello
+from core.security import check_node_token, check_join_auth, generate_join_token
+
+_node_tokens = {}
 
 TAG = "BLE"
 
@@ -153,20 +156,33 @@ async def rx_task(ingress_queue, neighbour_table):
                                 logger.info(TAG, "BLE RX distance: {} cm from {}".format(
                                     distance_cm, device_name))
                                 
-                                # Create sensor packet
-                                pkt = packet.create_packet(
-                                    src=node_id,
-                                    dst="bridge",
-                                    payload={"distance": distance_cm},
-                                )
-                                
-                                if pkt and isinstance(pkt, dict):
-                                    # classify_priority() expects payload and returns an int priority
-                                    pkt["priority"] = packet.classify_priority(pkt.get("payload", {}))
-                                    ingress_queue.push(pkt.get("priority", packet.PRIORITY_NORMAL), pkt)
-                                    logger.debug(TAG, "Enqueued BLE distance from {}".format(node_id))
-                                else:
-                                    logger.warn(TAG, "create_packet returned invalid packet")
+                            # BLE packet must come from a node that has joined the mesh
+                            if node_id not in _node_tokens:
+                                logger.warn(TAG, "BLE packet from {} with no join token; dropping".format(node_id))
+                                continue
+                            
+                            # Create sensor packet
+                            pkt = packet.create_packet(
+                                src=node_id,
+                                dst="bridge",
+                                payload={"distance": distance_cm},
+                            )
+                            
+                            # Mark neighbor as joined
+                            neighbour_table.update(
+                                node_id,
+                                protocols=["BLE"],
+                                rssi=rssi,
+                                capabilities=["BLE"],
+                            )
+                            
+                            if pkt and isinstance(pkt, dict):
+                                # classify_priority() expects payload and returns an int priority
+                                pkt["priority"] = packet.classify_priority(pkt.get("payload", {}))
+                                ingress_queue.push(pkt.get("priority", packet.PRIORITY_NORMAL), pkt)
+                                logger.debug(TAG, "Enqueued BLE distance from {}".format(node_id))
+                            else:
+                                logger.warn(TAG, "create_packet returned invalid packet")
                             else:
                                 logger.warn(TAG, "BLE read returned empty or invalid data")
                         finally:

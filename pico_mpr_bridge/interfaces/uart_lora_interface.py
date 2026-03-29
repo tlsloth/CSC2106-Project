@@ -5,8 +5,8 @@ except ImportError:
 
 import config
 from core.neighbour import create_hello_payload
+from core.security import check_join_auth, check_node_token, generate_join_token, xor_token_hex
 from utils import logger
-import time
 
 TAG = "LoRaUART"
 DEFAULT_PRIORITY = 5
@@ -47,51 +47,6 @@ def _parse_json_message(payload_bytes):
         return None
 
 
-def _check_join_auth(msg):
-    network = msg.get("network") or msg.get("network_name")
-    if network != getattr(config, "MESH_NETWORK_NAME", ""):
-        return False, "network_mismatch"
-
-    expected_key = getattr(config, "MESH_JOIN_KEY", "")
-    provided_key = msg.get("auth") or msg.get("key") or ""
-    if expected_key and provided_key != expected_key:
-        return False, "auth_failed"
-
-    return True, "ok"
-
-
-def _generate_join_token():
-    token_bytes = int(getattr(config, "MESH_JOIN_TOKEN_BYTES", 8) or 8)
-    if token_bytes < 4:
-        token_bytes = 4
-    if token_bytes > 24:
-        token_bytes = 24
-
-    try:
-        import ubinascii
-        import urandom
-        raw = bytes([urandom.getrandbits(8) for _ in range(token_bytes)])
-        return ubinascii.hexlify(raw).decode("utf-8")
-    except Exception:
-        # Fallback for runtimes without urandom/ubinascii.
-        return "{:08x}{:04x}".format(
-            int(time.ticks_ms()) & 0xFFFFFFFF,
-            len(_node_tokens) & 0xFFFF,
-        )
-
-
-def _check_node_token(msg, node_id):
-    expected = _node_tokens.get(node_id)
-    if not expected:
-        return False, "token_not_issued"
-
-    provided = str(msg.get("token") or "")
-    if provided != expected:
-        return False, "token_invalid_or_missing"
-
-    return True, "ok"
-
-
 def _send_join_ack(req_msg, accepted, reason="ok", token=""):
     node_id = str(req_msg.get("node_id") or req_msg.get("src") or "unknown")
     logger.info(
@@ -102,12 +57,13 @@ def _send_join_ack(req_msg, accepted, reason="ok", token=""):
             reason,
         ),
     )
+    encrypted_token = xor_token_hex(token, getattr(config, "MESH_JOIN_KEY", "")) if token else ""
     _send_line(
         "LORA_JOIN_ACK|{}|{}|{}|{}".format(
             1 if accepted else 0,
             config.NODE_ID,
             node_id,
-            token if token else "",
+            encrypted_token,
         )
     )
 
@@ -285,27 +241,28 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
                             # fall back to extracting source_id from the payload body.
                             source_id = parsed.get("node") or _extract_source_id(payload)
 
-                            # For simple endpoint nodes (e.g., DHT sender) that don't emit hello,
-                            # treat inbound data as proof of neighbour presence.
-                            if source_id and source_id != "lora_uart":
-                                neighbour_table.update(
-                                    source_id,
-                                    protocols=["LoRa"],
-                                    rssi=parsed.get("rssi", 0),
-                                    capabilities=["LoRa"],
-                                )
-
                             msg = _parse_json_message(payload)
                             if not isinstance(msg, dict):
                                 logger.warn(TAG, "Dropped non-JSON payload from {}".format(source_id))
                                 continue
 
-                            if isinstance(msg, dict) and msg.get("type") == "join_req":
-                                ok, reason = _check_join_auth(msg)
+                            msg_type = str(msg.get("type") or "")
+                            msg_node_id = str(msg.get("node_id") or msg.get("src") or source_id)
+
+                            # Packet acceptance: join_req with valid auth, or any other type with valid token
+                            if msg_type == "join_req":
+                                ok, reason = check_join_auth(
+                                    msg,
+                                    getattr(config, "MESH_NETWORK_NAME", ""),
+                                    getattr(config, "MESH_JOIN_KEY", ""),
+                                )
                                 node_id = str(msg.get("node_id") or source_id)
                                 token = ""
                                 if ok:
-                                    token = _generate_join_token()
+                                    token = generate_join_token(
+                                        token_bytes=int(getattr(config, "MESH_JOIN_TOKEN_BYTES", 8) or 8),
+                                        entropy_hint=len(_node_tokens),
+                                    )
                                     _node_tokens[node_id] = token
                                     neighbour_table.update(
                                         node_id,
@@ -320,22 +277,36 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
                                 _send_join_ack(msg, ok, reason=reason, token=token)
                                 continue
 
-                            msg_type = str(msg.get("type") or "")
-                            msg_node_id = str(msg.get("node_id") or msg.get("src") or source_id)
-                            if msg_type and msg_type != "join_req":
-                                token_ok, token_reason = _check_node_token(msg, msg_node_id)
-                                if not token_ok:
-                                    logger.warn(
-                                        TAG,
-                                        "Dropped {} from {} ({})".format(
-                                            msg_type,
-                                            msg_node_id,
-                                            token_reason,
-                                        ),
-                                    )
-                                    continue
+                            # For all non-join_req packets: token is mandatory
+                            if not msg_type:
+                                logger.warn(TAG, "Dropped packet from {} with no type".format(msg_node_id))
+                                continue
 
-                            if msg.get("type") == "route_query":
+                            token_ok, token_reason = check_node_token(
+                                msg,
+                                _node_tokens.get(msg_node_id),
+                                getattr(config, "MESH_JOIN_KEY", ""),
+                            )
+                            if not token_ok:
+                                logger.warn(
+                                    TAG,
+                                    "Dropped {} from {} ({})".format(
+                                        msg_type,
+                                        msg_node_id,
+                                        token_reason,
+                                    ),
+                                )
+                                continue
+
+                            # Token validated; now update neighbor and process packet
+                            neighbour_table.update(
+                                msg_node_id,
+                                protocols=["LoRa"],
+                                rssi=parsed.get("rssi", 0),
+                                capabilities=msg.get("capabilities", ["LoRa"]),
+                            )
+
+                            if msg_type == "route_query":
                                 route = None
                                 if routing_table is not None:
                                     dst = msg.get("dst")
@@ -344,19 +315,12 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
                                 _send_route_response(msg, route)
                                 continue
 
-                            if msg.get("type") == "hello":
-                                node_id = str(msg.get("node_id") or source_id)
-                                neighbour_table.update(
-                                    node_id,
-                                    protocols=["LoRa"],
-                                    rssi=parsed["rssi"],
-                                    capabilities=msg.get("capabilities", ["LoRa"]),
-                                )
+                            if msg_type == "hello":
                                 continue
 
                             pkt = translate_lora_payload(
                                 payload,
-                                source_id=source_id,
+                                source_id=msg_node_id,
                             )
                             if pkt:
                                 pkt["rssi"] = parsed.get("rssi", 0)

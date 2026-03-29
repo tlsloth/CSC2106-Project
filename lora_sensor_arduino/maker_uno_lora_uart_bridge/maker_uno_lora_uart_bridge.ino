@@ -135,16 +135,16 @@ void sendRawLoRaPayload(const char *payload)
 
 void sendJoinAckFromBridge(bool accepted, const char *bridgeId, const char *nodeId, const char *token)
 {
-  (void)nodeId;
   char payload[220];
   if (token && token[0])
   {
     snprintf(
         payload,
         sizeof(payload),
-        "{\"type\":\"join_ack\",\"accepted\":%s,\"bridge_id\":\"%s\",\"token\":\"%s\"}",
+        "{\"type\":\"join_ack\",\"accepted\":%s,\"bridge_id\":\"%s\",\"target_id\":\"%s\",\"token\":\"%s\"}",
         accepted ? "true" : "false",
         (bridgeId && bridgeId[0]) ? bridgeId : "bridge_01",
+        (nodeId && nodeId[0]) ? nodeId : "unknown",
         token);
   }
   else
@@ -152,9 +152,10 @@ void sendJoinAckFromBridge(bool accepted, const char *bridgeId, const char *node
     snprintf(
         payload,
         sizeof(payload),
-        "{\"type\":\"join_ack\",\"accepted\":%s,\"bridge_id\":\"%s\"}",
+        "{\"type\":\"join_ack\",\"accepted\":%s,\"bridge_id\":\"%s\",\"target_id\":\"%s\"}",
         accepted ? "true" : "false",
-        (bridgeId && bridgeId[0]) ? bridgeId : "bridge_01");
+        (bridgeId && bridgeId[0]) ? bridgeId : "bridge_01",
+        (nodeId && nodeId[0]) ? nodeId : "unknown");
   }
   sendRawLoRaPayload(payload);
 }

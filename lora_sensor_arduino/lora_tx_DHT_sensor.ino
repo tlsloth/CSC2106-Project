@@ -2,18 +2,18 @@
 #include <RH_RF95.h>
 #include <DHT.h>
 
-#define RFM95_CS   10
-#define RFM95_RST  9
-#define RFM95_INT  2
-#define RF95_FREQ  920.0
+#define RFM95_CS 10
+#define RFM95_RST 9
+#define RFM95_INT 2
+#define RF95_FREQ 920.0
 
-#define DHTPIN   3
-#define DHTTYPE  DHT22
+#define DHTPIN 3
+#define DHTTYPE DHT22
 
-const char MESH_NODE_ID[]      = "dht_sensor_A";
+const char MESH_NODE_ID[] = "dht_sensor_A";
 const char MESH_NETWORK_NAME[] = "CSC2106_MESH";
-const char MESH_JOIN_KEY[]     = "mesh_key_v1";
-const char TARGET_ROUTE_DST[]  = "dashboard";
+const char MESH_JOIN_KEY[] = "mesh_key_v1";
+const char TARGET_ROUTE_DST[] = "dashboard";
 
 RH_RF95 rf95(RFM95_CS, RFM95_INT);
 DHT dht(DHTPIN, DHTTYPE);
@@ -47,19 +47,23 @@ static bool contains(const char *haystack, const char *needle)
 
 static int findJsonValueStart(const char *json, const char *key)
 {
-  if (!json || !key) return -1;
+  if (!json || !key)
+    return -1;
 
   char needle[24];
   snprintf(needle, sizeof(needle), "\"%s\"", key);
 
   const char *keyPos = strstr(json, needle);
-  if (!keyPos) return -1;
+  if (!keyPos)
+    return -1;
 
   const char *colon = strchr(keyPos + strlen(needle), ':');
-  if (!colon) return -1;
+  if (!colon)
+    return -1;
 
   const char *p = colon + 1;
-  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+    p++;
 
   return (int)(p - json);
 }
@@ -67,7 +71,8 @@ static int findJsonValueStart(const char *json, const char *key)
 static bool extractJsonBool(const char *json, const char *key)
 {
   int start = findJsonValueStart(json, key);
-  if (start < 0) return false;
+  if (start < 0)
+    return false;
 
   const char *p = json + start;
   return (strncmp(p, "true", 4) == 0) || (*p == '1');
@@ -75,7 +80,8 @@ static bool extractJsonBool(const char *json, const char *key)
 
 static bool extractJsonString(const char *json, const char *key, char *out, size_t outSize)
 {
-  if (!json || !key || !out || outSize == 0) return false;
+  if (!json || !key || !out || outSize == 0)
+    return false;
 
   out[0] = '\0';
 
@@ -83,22 +89,28 @@ static bool extractJsonString(const char *json, const char *key, char *out, size
   snprintf(needle, sizeof(needle), "\"%s\"", key);
 
   const char *keyPos = strstr(json, needle);
-  if (!keyPos) return false;
+  if (!keyPos)
+    return false;
 
   const char *colon = strchr(keyPos + strlen(needle), ':');
-  if (!colon) return false;
+  if (!colon)
+    return false;
 
   const char *p = colon + 1;
-  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+    p++;
 
-  if (*p != '"') return false;
+  if (*p != '"')
+    return false;
   p++;
 
   const char *end = strchr(p, '"');
-  if (!end) return false;
+  if (!end)
+    return false;
 
   size_t len = (size_t)(end - p);
-  if (len >= outSize) len = outSize - 1;
+  if (len >= outSize)
+    len = outSize - 1;
 
   memcpy(out, p, len);
   out[len] = '\0';
@@ -107,22 +119,65 @@ static bool extractJsonString(const char *json, const char *key, char *out, size
 
 static bool isLikelyJsonText(const uint8_t *buf, uint8_t len)
 {
-  if (!buf || len < 2) return false;
+  if (!buf || len < 2)
+    return false;
 
   uint8_t start = 0;
-  while (start < len && (buf[start] == ' ' || buf[start] == '\t' || buf[start] == '\r' || buf[start] == '\n')) start++;
-  if (start >= len || buf[start] != '{') return false;
+  while (start < len && (buf[start] == ' ' || buf[start] == '\t' || buf[start] == '\r' || buf[start] == '\n'))
+    start++;
+  if (start >= len || buf[start] != '{')
+    return false;
 
   int end = len - 1;
-  while (end >= 0 && (buf[end] == ' ' || buf[end] == '\t' || buf[end] == '\r' || buf[end] == '\n')) end--;
-  if (end < 0 || buf[end] != '}') return false;
+  while (end >= 0 && (buf[end] == ' ' || buf[end] == '\t' || buf[end] == '\r' || buf[end] == '\n'))
+    end--;
+  if (end < 0 || buf[end] != '}')
+    return false;
 
+  return true;
+}
+
+static uint32_t fnv1a32(const char *str)
+{
+  uint32_t hash = 2166136261UL;
+  while (*str)
+  {
+    hash ^= (uint8_t)*str++;
+    hash *= 16777619UL;
+  }
+  return hash;
+}
+
+// XOR-decrypt a hex-encoded, XOR-encrypted token string using the mesh join key.
+// encoded: encrypted hex string  key: MESH_JOIN_KEY  out: buffer to write decrypted hex into
+static bool decryptToken(const char *encoded, const char *key, char *out, size_t outSize)
+{
+  size_t hexLen = strlen(encoded);
+  if (hexLen == 0 || hexLen % 2 != 0)
+    return false;
+  size_t byteCount = hexLen / 2;
+  if (byteCount * 2 + 1 > outSize)
+    return false;
+  size_t keyLen = strlen(key);
+  if (keyLen == 0)
+    return false;
+  for (size_t i = 0; i < byteCount; i++)
+  {
+    char hi = encoded[i * 2], lo = encoded[i * 2 + 1];
+    uint8_t h = (hi >= '0' && hi <= '9') ? hi - '0' : (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10
+                                                                               : hi - 'A' + 10;
+    uint8_t l = (lo >= '0' && lo <= '9') ? lo - '0' : (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10
+                                                                               : lo - 'A' + 10;
+    uint8_t b = ((h << 4) | l) ^ (uint8_t)key[i % keyLen];
+    snprintf(out + i * 2, 3, "%02x", b);
+  }
   return true;
 }
 
 void sendRawLoRa(const char *payload)
 {
-  if (!payload || !payload[0]) return;
+  if (!payload || !payload[0])
+    return;
   rf95.send((const uint8_t *)payload, strlen(payload));
   rf95.waitPacketSent();
   rf95.setModeRx();
@@ -133,22 +188,23 @@ void sendJoinRequest()
   char payload[180];
   uint8_t seq = sequenceNum++;
 
+  char authHex[9];
+  snprintf(authHex, sizeof(authHex), "%08lx", (unsigned long)fnv1a32(MESH_JOIN_KEY));
+
   int written;
   if (meshToken[0] != '\0')
   {
     written = snprintf(
-      payload, sizeof(payload),
-      "{\"type\":\"join_req\",\"node_id\":\"%s\",\"network\":\"%s\",\"auth\":\"%s\",\"token\":\"%s\",\"seq\":%u}",
-      MESH_NODE_ID, MESH_NETWORK_NAME, MESH_JOIN_KEY, meshToken, (unsigned int)seq
-    );
+        payload, sizeof(payload),
+        "{\"type\":\"join_req\",\"node_id\":\"%s\",\"network\":\"%s\",\"auth\":\"%s\",\"token\":\"%s\",\"seq\":%u}",
+        MESH_NODE_ID, MESH_NETWORK_NAME, authHex, meshToken, (unsigned int)seq);
   }
   else
   {
     written = snprintf(
-      payload, sizeof(payload),
-      "{\"type\":\"join_req\",\"node_id\":\"%s\",\"network\":\"%s\",\"auth\":\"%s\",\"seq\":%u}",
-      MESH_NODE_ID, MESH_NETWORK_NAME, MESH_JOIN_KEY, (unsigned int)seq
-    );
+        payload, sizeof(payload),
+        "{\"type\":\"join_req\",\"node_id\":\"%s\",\"network\":\"%s\",\"auth\":\"%s\",\"seq\":%u}",
+        MESH_NODE_ID, MESH_NETWORK_NAME, authHex, (unsigned int)seq);
   }
 
   if (written > 0 && written < (int)sizeof(payload))
@@ -162,11 +218,15 @@ void sendHelloPacket()
   char payload[180];
   uint8_t seq = sequenceNum++;
 
+  char encToken[48];
+  encToken[0] = '\0';
+  if (meshToken[0] != '\0')
+    decryptToken(meshToken, MESH_JOIN_KEY, encToken, sizeof(encToken));
+
   int written = snprintf(
-    payload, sizeof(payload),
-    "{\"type\":\"hello\",\"node_id\":\"%s\",\"network\":\"%s\",\"token\":\"%s\",\"seq\":%u}",
-    MESH_NODE_ID, MESH_NETWORK_NAME, meshToken, (unsigned int)seq
-  );
+      payload, sizeof(payload),
+      "{\"type\":\"hello\",\"node_id\":\"%s\",\"network\":\"%s\",\"token\":\"%s\",\"seq\":%u}",
+      MESH_NODE_ID, MESH_NETWORK_NAME, encToken, (unsigned int)seq);
 
   if (written > 0 && written < (int)sizeof(payload))
   {
@@ -179,11 +239,15 @@ void sendRouteQuery(const char *dst)
   char payload[180];
   uint8_t seq = sequenceNum++;
 
+  char encToken[48];
+  encToken[0] = '\0';
+  if (meshToken[0] != '\0')
+    decryptToken(meshToken, MESH_JOIN_KEY, encToken, sizeof(encToken));
+
   int written = snprintf(
-    payload, sizeof(payload),
-    "{\"type\":\"route_query\",\"src\":\"%s\",\"dst\":\"%s\",\"token\":\"%s\",\"seq\":%u}",
-    MESH_NODE_ID, dst, meshToken, (unsigned int)seq
-  );
+      payload, sizeof(payload),
+      "{\"type\":\"route_query\",\"src\":\"%s\",\"dst\":\"%s\",\"token\":\"%s\",\"seq\":%u}",
+      MESH_NODE_ID, dst, encToken, (unsigned int)seq);
 
   if (written > 0 && written < (int)sizeof(payload))
   {
@@ -195,7 +259,8 @@ void sendRouteQuery(const char *dst)
 
 void sendTelemetryJson(float temperature, float humidity)
 {
-  if (isnan(temperature) || isnan(humidity)) return;
+  if (isnan(temperature) || isnan(humidity))
+    return;
 
   char tempStr[12];
   char humStr[12];
@@ -205,11 +270,15 @@ void sendTelemetryJson(float temperature, float humidity)
   dtostrf(humidity, 0, 1, humStr);
 
   uint8_t seq = sequenceNum++;
+  char encToken[48];
+  encToken[0] = '\0';
+  if (meshToken[0] != '\0')
+    decryptToken(meshToken, MESH_JOIN_KEY, encToken, sizeof(encToken));
+
   int written = snprintf(
-    payload, sizeof(payload),
-    "{\"type\":\"sensor_data\",\"node_id\":\"%s\",\"temp\":%s,\"hum\":%s,\"token\":\"%s\",\"seq\":%u}",
-    MESH_NODE_ID, tempStr, humStr, meshToken, (unsigned int)seq
-  );
+      payload, sizeof(payload),
+      "{\"type\":\"sensor_data\",\"node_id\":\"%s\",\"temp\":%s,\"hum\":%s,\"token\":\"%s\",\"seq\":%u}",
+      MESH_NODE_ID, tempStr, humStr, encToken, (unsigned int)seq);
 
   if (written > 0 && written < (int)sizeof(payload))
   {
@@ -219,20 +288,29 @@ void sendTelemetryJson(float temperature, float humidity)
 
 void handleControlMessage(const char *incoming)
 {
-  if (!incoming || !incoming[0]) return;
+  if (!incoming || !incoming[0])
+    return;
 
   if (contains(incoming, "\"type\":\"join_ack\""))
   {
+    char targetId[20];
+    targetId[0] = '\0';
+    extractJsonString(incoming, "target_id", targetId, sizeof(targetId));
+    if (!streq(targetId, MESH_NODE_ID))
+    {
+      return;
+    }
+
     if (extractJsonBool(incoming, "accepted"))
     {
       char bridgeId[20];
-      char token[48];
+      char encToken[48];
 
       bridgeId[0] = '\0';
-      token[0] = '\0';
+      encToken[0] = '\0';
 
       extractJsonString(incoming, "bridge_id", bridgeId, sizeof(bridgeId));
-      extractJsonString(incoming, "token", token, sizeof(token));
+      extractJsonString(incoming, "token", encToken, sizeof(encToken));
 
       if (bridgeId[0] != '\0')
       {
@@ -240,7 +318,7 @@ void handleControlMessage(const char *incoming)
         learned_bridge_id[sizeof(learned_bridge_id) - 1] = '\0';
       }
 
-      if (token[0] == '\0')
+      if (encToken[0] == '\0' || !decryptToken(encToken, MESH_JOIN_KEY, meshToken, sizeof(meshToken)))
       {
         joined = false;
         meshToken[0] = '\0';
@@ -249,9 +327,6 @@ void handleControlMessage(const char *incoming)
         lastJoinTime = 0;
         return;
       }
-
-      strncpy(meshToken, token, sizeof(meshToken) - 1);
-      meshToken[sizeof(meshToken) - 1] = '\0';
 
       joined = true;
       awaitingRouteResponse = false;
@@ -291,7 +366,8 @@ void pollControlFrames(unsigned long maxMs)
 
   while ((millis() - start) < maxMs)
   {
-    if (!rf95.available()) break;
+    if (!rf95.available())
+      break;
 
     uint8_t recvBuf[RH_RF95_MAX_MESSAGE_LEN + 1];
     uint8_t recvLen = RH_RF95_MAX_MESSAGE_LEN;
@@ -326,12 +402,16 @@ void setup()
 
   if (!rf95.init())
   {
-    while (1) {}
+    while (1)
+    {
+    }
   }
 
   if (!rf95.setFrequency(RF95_FREQ))
   {
-    while (1) {}
+    while (1)
+    {
+    }
   }
 
   rf95.setTxPower(13, false);

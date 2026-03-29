@@ -6,6 +6,9 @@ import config
 from utils import logger
 from core import packet
 from core.neighbour import create_hello_payload, parse_hello
+from core.security import check_join_auth, check_node_token, generate_join_token
+
+_node_tokens = {}
 
 TAG = "WiFi"
 
@@ -249,9 +252,59 @@ async def rx_task(ingress_queue, neighbour_table):
                             logger.warn(TAG, "Failed to parse topology: {}".format(e))
                         continue
 
-                    # Handle command messages — route to LoRa/BLE egress
+                    # Handle command/sensor messages from mesh nodes — validate before enqueuing
+                    try:
+                        if isinstance(msg, (bytes, bytearray)):
+                            msg_str = msg.decode("utf-8")
+                        else:
+                            msg_str = str(msg)
+                        msg_obj = json.loads(msg_str)
+                    except Exception:
+                        logger.warn(TAG, "Failed to parse MQTT message as JSON: {}".format(topic))
+                        continue
+                    
+                    msg_type = str(msg_obj.get("type") or "")
+                    msg_node_id = str(msg_obj.get("node_id") or msg_obj.get("src") or "unknown")
+                    
+                    # Validate: join_req with auth, or other packets with token
+                    if msg_type == "join_req":
+                        ok, reason = check_join_auth(
+                            msg_obj,
+                            getattr(config, "MESH_NETWORK_NAME", ""),
+                            getattr(config, "MESH_JOIN_KEY", ""),
+                        )
+                        if ok:
+                            token = generate_join_token(
+                                token_bytes=int(getattr(config, "MESH_JOIN_TOKEN_BYTES", 8) or 8),
+                                entropy_hint=len(_node_tokens),
+                            )
+                            _node_tokens[msg_node_id] = token
+                            logger.info(TAG, "Join accepted for {} via MQTT".format(msg_node_id))
+                        else:
+                            _node_tokens.pop(msg_node_id, None)
+                            logger.warn(TAG, "Join rejected for {} ({})".format(msg_node_id, reason))
+                        continue
+                    
+                    # For all other message types: token is mandatory
+                    if not msg_type:
+                        logger.warn(TAG, "MQTT message from {} has no type".format(msg_node_id))
+                        continue
+                    
+                    token_ok, token_reason = check_node_token(
+                        msg_obj,
+                        _node_tokens.get(msg_node_id),
+                        getattr(config, "MESH_JOIN_KEY", ""),
+                    )
+                    if not token_ok:
+                        logger.warn(TAG, "Dropped MQTT {} from {} ({})".format(
+                            msg_type, msg_node_id, token_reason))
+                        continue
+                    
+                    # Token validated; translate and enqueue
                     pkt = translate_from_mqtt(topic, msg)
                     if pkt:
+                        # Ensure src is from validated origin
+                        pkt["src"] = msg_node_id
                         ingress_queue.push(pkt.get("priority", packet.PRIORITY_NORMAL), pkt)
 
         except Exception as e:

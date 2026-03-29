@@ -30,41 +30,13 @@
 #endif
 
 // ============== NODE CONFIG ==============
-#define MY_NODE_ID 'A'
-#define TARGET_NODE_ID 'B'
+#define MY_NODE_ID 'dht_sensor_A'
+#define TARGET_NODE_ID 'bridge_01'
 
 // Mesh join/discovery control channel (JSON over LoRa)
 const char *MESH_NODE_ID = "dht_sensor_A";
 const char *MESH_NETWORK_NAME = "CSC2106_MESH";
 const char *MESH_JOIN_KEY = "mesh_key_v1";
-
-// ============== PROTOCOL CONFIG ==============
-#define MAX_RETRIES 3
-#define ACK_TIMEOUT 3000
-#define ACK_RX_GUARD_MS 15
-#define MSG_TYPE_DATA 0x01
-#define MSG_TYPE_ACK 0x02
-#define PACKET_START 0xCB
-#define HEADER_SIZE 6
-#define MAX_PAYLOAD 20
-
-// ACK behavior controls:
-// - Set REQUIRE_ACK to false to treat send as fire-and-forget.
-// - Keep DEBUG_ACK enabled while validating receiver ACK format.
-#define REQUIRE_ACK true
-#define DEBUG_ACK false
-
-struct Packet
-{
-  uint8_t start;
-  uint8_t from;
-  uint8_t to;
-  uint8_t type;
-  uint8_t seq;
-  uint8_t len;
-  uint8_t payload[MAX_PAYLOAD];
-  uint8_t checksum;
-};
 
 // ============== GLOBALS ==============
 #if ENABLE_OLED
@@ -88,7 +60,7 @@ const unsigned long HELLO_INTERVAL = 5000;
 const unsigned long ROUTE_QUERY_INTERVAL = 15000;
 const unsigned long JOIN_WAIT_LOG_INTERVAL = 1000;
 
-// ===== Original String-based helpers (kept for now if you still use them elsewhere) =====
+// ===== Original String-based helpers (still available if needed) =====
 int findJsonValueStart(const String &json, const char *key)
 {
   String needle = String("\"") + key + "\"";
@@ -336,6 +308,51 @@ void sendRouteQuery(const char *dst)
   sendRawLoRa(payload);
 }
 
+void sendTelemetryJson(float temperature, float humidity)
+{
+  // First convert floats to strings safely
+  char tempStr[16];
+  char humStr[16];
+
+  // Ensure we have valid numbers before conversion
+  if (isnan(temperature) || isnan(humidity))
+  {
+    Serial.println(F("[TX DATA] NaN values, skipping telemetry"));
+    return;
+  }
+
+  dtostrf(temperature, 0, 1, tempStr); // e.g. "26.2"
+  dtostrf(humidity,   0, 1, humStr);   // e.g. "58.0"
+
+  char payload[200];
+  uint8_t seq = sequenceNum++;
+
+  // Now build JSON using the stringified numbers
+  int written = snprintf(
+      payload,
+      sizeof(payload),
+      "{\"type\":\"sensor_data\",\"node_id\":\"%s\",\"temp\":%s,\"hum\":%s,\"seq\":%u}",
+      MESH_NODE_ID,
+      tempStr,
+      humStr,
+      (unsigned int)seq
+  );
+
+  Serial.print(F("[TX DATA] "));
+  if (written <= 0 || written >= (int)sizeof(payload))
+  {
+    Serial.print(F("build failed, written="));
+    Serial.println(written);
+    return;
+  }
+
+  Serial.print(F("len="));
+  Serial.print(strlen(payload));
+  Serial.print(F(" payload="));
+  Serial.println(payload);
+  sendRawLoRa(payload);
+}
+
 // ============== CONTROL MESSAGE HANDLER (C-string) ==============
 void handleControlMessage(const char *incoming)
 {
@@ -439,26 +456,7 @@ void pollControlFrames(unsigned long maxMs)
       Serial.println(rf95.lastRssi());
     }
 
-    Packet maybeAck;
-    if (deserializePacket(recvBuf, recvLen, &maybeAck))
-    {
-      if (!joined)
-      {
-        Serial.print(F("[RX CTRL] ignored binary frame while waiting join, len="));
-        Serial.print(recvLen);
-        Serial.print(F(" type="));
-        Serial.println((int)maybeAck.type);
-      }
-      continue;
-    }
-
-    char raw[RH_RF95_MAX_MESSAGE_LEN + 1];
-    uint8_t copyLen = recvLen;
-    if (copyLen > RH_RF95_MAX_MESSAGE_LEN)
-    {
-      copyLen = RH_RF95_MAX_MESSAGE_LEN;
-    }
-
+    // Print hex
     Serial.print(F("[RX CTR HEX]"));
     for (uint8_t i = 0; i < recvLen; i++)
     {
@@ -468,14 +466,15 @@ void pollControlFrames(unsigned long maxMs)
     }
     Serial.println();
 
-    recvBuf[recvLen] = '\0';           // make it a C string
+    // Treat as JSON text
+    if (recvLen >= RH_RF95_MAX_MESSAGE_LEN) {
+      recvLen = RH_RF95_MAX_MESSAGE_LEN - 1;
+    }
+    recvBuf[recvLen] = '\0';
+
     Serial.print(F("[RX CTRL] "));
     Serial.println((char*)recvBuf);
     handleControlMessage((char*)recvBuf);
-
-    
-
-
   }
 }
 
@@ -515,257 +514,12 @@ void oledStatus(float temp, float hum, const char *status)
 #endif
 }
 
-// ============== CHECKSUM ==============
-uint8_t calculateChecksum(Packet *pkt)
-{
-  uint8_t cs = 0;
-  cs ^= pkt->start;
-  cs ^= pkt->from;
-  cs ^= pkt->to;
-  cs ^= pkt->type;
-  cs ^= pkt->seq;
-  cs ^= pkt->len;
-  for (uint8_t i = 0; i < pkt->len; i++)
-  {
-    cs ^= pkt->payload[i];
-  }
-  return cs;
-}
-
-// ============== PACKET FUNCTIONS ==============
-void createDataPacket(Packet *pkt, uint8_t targetId, const char *message)
-{
-  pkt->start = PACKET_START;
-  pkt->from = MY_NODE_ID;
-  pkt->to = targetId;
-  pkt->type = MSG_TYPE_DATA;
-  pkt->seq = sequenceNum;
-  pkt->len = strlen(message);
-  if (pkt->len > MAX_PAYLOAD)
-    pkt->len = MAX_PAYLOAD;
-  memcpy(pkt->payload, message, pkt->len);
-  pkt->checksum = calculateChecksum(pkt);
-}
-
-uint8_t serializePacket(Packet *pkt, uint8_t *buffer)
-{
-  uint8_t idx = 0;
-  buffer[idx++] = pkt->start;
-  buffer[idx++] = pkt->from;
-  buffer[idx++] = pkt->to;
-  buffer[idx++] = pkt->type;
-  buffer[idx++] = pkt->seq;
-  buffer[idx++] = pkt->len;
-  for (uint8_t i = 0; i < pkt->len; i++)
-  {
-    buffer[idx++] = pkt->payload[i];
-  }
-  buffer[idx++] = pkt->checksum;
-  return idx;
-}
-
-bool deserializePacket(uint8_t *buffer, uint8_t bufLen, Packet *pkt)
-{
-  if (bufLen < HEADER_SIZE + 1)
-    return false;
-  if (buffer[0] != PACKET_START)
-    return false;
-
-  pkt->start = buffer[0];
-  pkt->from = buffer[1];
-  pkt->to = buffer[2];
-  pkt->type = buffer[3];
-  pkt->seq = buffer[4];
-  pkt->len = buffer[5];
-
-  if (pkt->len > MAX_PAYLOAD)
-    return false;
-  if (bufLen < HEADER_SIZE + pkt->len + 1)
-    return false;
-
-  for (uint8_t i = 0; i < pkt->len; i++)
-  {
-    pkt->payload[i] = buffer[HEADER_SIZE + i];
-  }
-  pkt->checksum = buffer[HEADER_SIZE + pkt->len];
-
-  return (calculateChecksum(pkt) == pkt->checksum);
-}
-
-void printHexBytes(const uint8_t *data, uint8_t len)
-{
-  for (uint8_t i = 0; i < len; i++)
-  {
-    if (data[i] < 0x10)
-      Serial.print('0');
-    Serial.print(data[i], HEX);
-    if (i + 1 < len)
-      Serial.print(' ');
-  }
-}
-
-bool isAckForTx(const Packet *ackPkt, const Packet *txPkt, uint8_t expectedFrom)
-{
-  return (ackPkt->to == MY_NODE_ID &&
-          ackPkt->from == expectedFrom &&
-          ackPkt->type == MSG_TYPE_ACK &&
-          ackPkt->seq == txPkt->seq);
-}
-
-void flushRxQueue(unsigned long maxMs)
-{
-  unsigned long start = millis();
-  uint8_t junk[50];
-  uint8_t junkLen = sizeof(junk);
-
-  while ((millis() - start) < maxMs)
-  {
-    if (!rf95.available())
-      break;
-    junkLen = sizeof(junk);
-    if (!rf95.recv(junk, &junkLen))
-      break;
-
-    if (DEBUG_ACK)
-    {
-      Serial.print(F("Flushed stale RX frame len="));
-      Serial.println(junkLen);
-    }
-    delay(2);
-  }
-}
-
-// ============== SEND WITH RETRY ==============
-bool sendWithRetry(uint8_t targetId, const char *message)
-{
-  Packet txPacket;
-  createDataPacket(&txPacket, targetId, message);
-
-  uint8_t buffer[40];
-  uint8_t len = serializePacket(&txPacket, buffer);
-
-  Serial.print(F("Sending: "));
-  Serial.println(message);
-
-  for (uint8_t attempt = 1; attempt <= MAX_RETRIES; attempt++)
-  {
-    Serial.print(F("Attempt "));
-    Serial.print(attempt);
-    Serial.print(F("/"));
-    Serial.println(MAX_RETRIES);
-
-    // Clear any stale frame from previous attempts before sending this packet.
-    flushRxQueue(30);
-
-    rf95.send(buffer, len);
-    rf95.waitPacketSent();
-
-    // Give the radio a brief guard time to re-enter RX before ACK is sent back.
-    rf95.setModeRx();
-    delay(ACK_RX_GUARD_MS);
-
-    if (!REQUIRE_ACK)
-    {
-      Serial.println(F("ACK disabled: treating as delivered"));
-      sequenceNum++;
-      return true;
-    }
-
-    bool ackMatched = false;
-    unsigned long ackStart = millis();
-    while ((millis() - ackStart) < ACK_TIMEOUT)
-    {
-      uint16_t remaining = ACK_TIMEOUT - (uint16_t)(millis() - ackStart);
-      if (rf95.waitAvailableTimeout(remaining))
-      {
-        uint8_t recvBuf[50];
-        uint8_t recvLen = sizeof(recvBuf);
-        if (!rf95.recv(recvBuf, &recvLen))
-        {
-          continue;
-        }
-
-        if (DEBUG_ACK)
-        {
-          Serial.print(F("RX candidate len="));
-          Serial.print(recvLen);
-          Serial.print(F(" bytes: "));
-          printHexBytes(recvBuf, recvLen);
-          Serial.println();
-        }
-
-        Packet ackPkt;
-        if (deserializePacket(recvBuf, recvLen, &ackPkt))
-        {
-          if (DEBUG_ACK)
-          {
-            Serial.print(F("ACK parsed: from="));
-            Serial.print((char)ackPkt.from);
-            Serial.print(F(" to="));
-            Serial.print((char)ackPkt.to);
-            Serial.print(F(" seq="));
-            Serial.println(ackPkt.seq);
-          }
-
-          if (isAckForTx(&ackPkt, &txPacket, targetId))
-          {
-            ackMatched = true;
-            break;
-          }
-
-          if (DEBUG_ACK)
-          {
-            Serial.println(F("ACK parsed but does not match this TX (from/to/type/seq mismatch)"));
-          }
-        }
-        else if (DEBUG_ACK)
-        {
-          char raw[RH_RF95_MAX_MESSAGE_LEN + 1];
-          uint8_t copyLen = recvLen;
-          if (copyLen > RH_RF95_MAX_MESSAGE_LEN)
-          {
-            copyLen = RH_RF95_MAX_MESSAGE_LEN;
-          }
-          memcpy(raw, recvBuf, copyLen);
-          raw[copyLen] = '\0';
-
-          Serial.print(F("RX non-ACK frame: "));
-          Serial.println(raw);
-          handleControlMessage(raw);
-        }
-      }
-      else
-      {
-        break;
-      }
-    }
-
-    if (ackMatched)
-    {
-      Serial.println(F("ACK OK!"));
-      sequenceNum++;
-      return true;
-    }
-
-    if (DEBUG_ACK)
-    {
-      Serial.println(F("ACK wait timeout: no matching ACK"));
-    }
-    Serial.println(F("No ACK, retrying..."));
-    delay(200 + random(200));
-  }
-
-  Serial.println(F("Delivery failed"));
-  sequenceNum++;
-  return false;
-}
-
 // ============== SETUP ==============
 void setup()
 {
   Serial.begin(9600);
   delay(100);
-  Serial.println(F("=== LoRa TX + DHT22 ==="));
+  Serial.println(F("=== LoRa TX + DHT22 (JSON-only) ==="));
 
   Wire.begin();
   dht.begin();
@@ -871,32 +625,10 @@ void loop()
   Serial.print(humidity, 1);
   Serial.println(F("%"));
 
-  // Format payload: "T:24.5,H:61.2" (fits in 20 bytes)
-  char message[MAX_PAYLOAD];
-  dtostrf(temperature, 4, 1, message); // e.g. "24.5"
-  char humStr[8];
-  dtostrf(humidity, 4, 1, humStr); // e.g. "61.2"
-
-  // Build "T:24.5,H:61.2"
-  char payload[MAX_PAYLOAD];
-  snprintf(payload, MAX_PAYLOAD, "T:%s,H:%s", message, humStr);
-
-  Serial.print(F("Payload: "));
-  Serial.println(payload);
-
   oledStatus(temperature, humidity, "Sending...");
 
-  bool ok = sendWithRetry(TARGET_NODE_ID, payload);
-
-  if (ok)
-  {
-    Serial.println(F("Delivered!"));
-    oledStatus(temperature, humidity, "Delivered!");
-  }
-  else
-  {
-    oledStatus(temperature, humidity, "Failed!");
-  }
+  // JSON telemetry
+  sendTelemetryJson(temperature, humidity);
 
   // DHT22 needs minimum 2s between reads
   delay(5000);

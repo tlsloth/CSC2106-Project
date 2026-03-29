@@ -42,7 +42,7 @@
 
 // Protocol
 #define PACKET_START 0xCB
-#define MY_NODE_ID 'B'
+#define MY_NODE_ID 'bridge_01'
 #define MSG_TYPE_DATA 0x01
 #define MSG_TYPE_ACK 0x02
 #define HEADER_SIZE 6
@@ -69,16 +69,6 @@ RH_RF95 rf95(RFM95_CS, RFM95_INT);
 
 char uartLine[UART_LINE_MAX];
 uint16_t uartLineLen = 0;
-
-void pausePicoUart()
-{
-  // No-op with hardware Serial bridge.
-}
-
-void resumePicoUart()
-{
-  // No-op with hardware Serial bridge.
-}
 
 uint8_t calculateChecksum(Packet *pkt)
 {
@@ -180,7 +170,6 @@ void sendRawLoRaPayload(const char *payload)
   DBG_PRINT(F("TX LoRa start len="));
   DBG_PRINTLN((unsigned int)payloadLen);
 
-  pausePicoUart();
   delay(5);
   rf95.send((uint8_t *)payload, payloadLen);
   bool txOk = rf95.waitPacketSent(3000);
@@ -192,8 +181,6 @@ void sendRawLoRaPayload(const char *payload)
   }
   delay(5);
   rf95.setModeRx();
-  resumePicoUart();
-
   if (txOk)
   {
     DBG_PRINT(F("TX LoRa sent: "));
@@ -215,8 +202,7 @@ void sendJoinAckFromBridge(bool accepted, const char *bridgeId, const char *node
   size_t payloadLen = strlen(payload);
   DBG_PRINT(F("Bridge TX test len="));
   DBG_PRINTLN((unsigned int)payloadLen);
-
-  pausePicoUart();
+  DBG_PRINTLN("Join request acknowleding for you boss!");
   rf95.setModeIdle();
   rf95.send((uint8_t *)payload, payloadLen);
 
@@ -232,7 +218,6 @@ void sendJoinAckFromBridge(bool accepted, const char *bridgeId, const char *node
   txOk = (millis() - start <= 3000);
 
   rf95.setModeRx();
-  resumePicoUart();
 
   DBG_PRINT(F("Bridge TX test result="));
   DBG_PRINTLN(txOk ? F("OK") : F("TIMEOUT"));
@@ -431,7 +416,7 @@ void sendAck(Packet *rxPkt)
 
   // Delay ACK slightly so sender has time to switch from TX to RX.
   delay(ACK_DELAY_MS);
-  pausePicoUart();
+
   rf95.send(buf, sizeof(buf));
   if (!rf95.waitPacketSent(1500))
   {
@@ -439,7 +424,7 @@ void sendAck(Packet *rxPkt)
     rf95.setModeIdle();
   }
   rf95.setModeRx();
-  resumePicoUart();
+
   DBG_PRINTLN(F("ACK sent"));
 }
 

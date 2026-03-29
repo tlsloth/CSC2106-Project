@@ -28,6 +28,7 @@ ENABLE_WIFI_HELLO = True            # Keep MQTT/wifi topology discovery enabled
 MESH_NETWORK_NAME = "CSC2106_MESH"  # Shared network identity for discovery/join
 MESH_JOIN_KEY     = "mesh_key_v1"   # Basic shared key for join acceptance
 JOIN_ACK_TIMEOUT_S = 20              # Optional: edge-side join timeout guidance
+MESH_JOIN_TOKEN_BYTES = 8            # Session token size (hex string = 2x this length)
 
 # Cost model (cross-protocol translation costs)
 COST_NATIVE     = 1                 # LoRa->LoRa, WiFi->WiFi, BLE->BLE

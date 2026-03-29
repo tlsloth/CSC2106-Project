@@ -4,14 +4,16 @@ except ImportError:
     import json
 
 import config
-from core import packet
-from core.neighbour import create_hello_payload, parse_hello
+from core.neighbour import create_hello_payload
 from utils import logger
+import time
 
 TAG = "LoRaUART"
+DEFAULT_PRIORITY = 5
 
 _uart = None
 _rx_buf = b""
+_node_tokens = {}
 
 
 def _json_dumps(obj):
@@ -58,7 +60,39 @@ def _check_join_auth(msg):
     return True, "ok"
 
 
-def _send_join_ack(req_msg, accepted, reason="ok"):
+def _generate_join_token():
+    token_bytes = int(getattr(config, "MESH_JOIN_TOKEN_BYTES", 8) or 8)
+    if token_bytes < 4:
+        token_bytes = 4
+    if token_bytes > 24:
+        token_bytes = 24
+
+    try:
+        import ubinascii
+        import urandom
+        raw = bytes([urandom.getrandbits(8) for _ in range(token_bytes)])
+        return ubinascii.hexlify(raw).decode("utf-8")
+    except Exception:
+        # Fallback for runtimes without urandom/ubinascii.
+        return "{:08x}{:04x}".format(
+            int(time.ticks_ms()) & 0xFFFFFFFF,
+            len(_node_tokens) & 0xFFFF,
+        )
+
+
+def _check_node_token(msg, node_id):
+    expected = _node_tokens.get(node_id)
+    if not expected:
+        return False, "token_not_issued"
+
+    provided = str(msg.get("token") or "")
+    if provided != expected:
+        return False, "token_invalid_or_missing"
+
+    return True, "ok"
+
+
+def _send_join_ack(req_msg, accepted, reason="ok", token=""):
     node_id = str(req_msg.get("node_id") or req_msg.get("src") or "unknown")
     logger.info(
         TAG,
@@ -69,10 +103,11 @@ def _send_join_ack(req_msg, accepted, reason="ok"):
         ),
     )
     _send_line(
-        "LORA_JOIN_ACK|{}|{}|{}".format(
+        "LORA_JOIN_ACK|{}|{}|{}|{}".format(
             1 if accepted else 0,
             config.NODE_ID,
             node_id,
+            token if token else "",
         )
     )
 
@@ -261,10 +296,17 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
                                 )
 
                             msg = _parse_json_message(payload)
+                            if not isinstance(msg, dict):
+                                logger.warn(TAG, "Dropped non-JSON payload from {}".format(source_id))
+                                continue
+
                             if isinstance(msg, dict) and msg.get("type") == "join_req":
                                 ok, reason = _check_join_auth(msg)
+                                node_id = str(msg.get("node_id") or source_id)
+                                token = ""
                                 if ok:
-                                    node_id = str(msg.get("node_id") or source_id)
+                                    token = _generate_join_token()
+                                    _node_tokens[node_id] = token
                                     neighbour_table.update(
                                         node_id,
                                         protocols=["LoRa"],
@@ -273,11 +315,27 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
                                     )
                                     logger.info(TAG, "Join accepted for {}".format(node_id))
                                 else:
+                                    _node_tokens.pop(node_id, None)
                                     logger.warn(TAG, "Join rejected for {} ({})".format(source_id, reason))
-                                _send_join_ack(msg, ok, reason=reason)
+                                _send_join_ack(msg, ok, reason=reason, token=token)
                                 continue
 
-                            if isinstance(msg, dict) and msg.get("type") == "route_query":
+                            msg_type = str(msg.get("type") or "")
+                            msg_node_id = str(msg.get("node_id") or msg.get("src") or source_id)
+                            if msg_type and msg_type != "join_req":
+                                token_ok, token_reason = _check_node_token(msg, msg_node_id)
+                                if not token_ok:
+                                    logger.warn(
+                                        TAG,
+                                        "Dropped {} from {} ({})".format(
+                                            msg_type,
+                                            msg_node_id,
+                                            token_reason,
+                                        ),
+                                    )
+                                    continue
+
+                            if msg.get("type") == "route_query":
                                 route = None
                                 if routing_table is not None:
                                     dst = msg.get("dst")
@@ -286,25 +344,26 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
                                 _send_route_response(msg, route)
                                 continue
 
-                            hello = parse_hello(payload)
-                            if hello:
+                            if msg.get("type") == "hello":
+                                node_id = str(msg.get("node_id") or source_id)
                                 neighbour_table.update(
-                                    hello["node_id"],
+                                    node_id,
                                     protocols=["LoRa"],
                                     rssi=parsed["rssi"],
-                                    capabilities=hello.get("capabilities", ["LoRa"]),
+                                    capabilities=msg.get("capabilities", ["LoRa"]),
                                 )
-                            else:
-                                pkt = translate_lora_payload(
-                                    payload,
-                                    source_id=source_id,
+                                continue
+
+                            pkt = translate_lora_payload(
+                                payload,
+                                source_id=source_id,
+                            )
+                            if pkt:
+                                pkt["rssi"] = parsed.get("rssi", 0)
+                                ingress_queue.push(
+                                    pkt.get("priority", DEFAULT_PRIORITY),
+                                    pkt,
                                 )
-                                if pkt:
-                                    pkt["rssi"] = parsed.get("rssi", 0)
-                                    ingress_queue.push(
-                                        pkt.get("priority", packet.PRIORITY_NORMAL),
-                                        pkt,
-                                    )
                         else:
                             logger.debug(TAG, "Unrecognized bridge line: {}".format(parsed["line"]))
 
@@ -330,8 +389,12 @@ async def tx_task(egress_queue):
             if _uart is not None and not egress_queue.is_empty():
                 pkt = egress_queue.pop()
                 if pkt:
-                    payload = packet.encode_packet(pkt)
-                    text_payload = payload.decode("utf-8") if isinstance(payload, (bytes, bytearray)) else str(payload)
+                    if isinstance(pkt, dict):
+                        text_payload = _json_dumps(pkt)
+                    elif isinstance(pkt, (bytes, bytearray)):
+                        text_payload = pkt.decode("utf-8", "ignore")
+                    else:
+                        text_payload = str(pkt)
                     _send_line("LORA_TX|{}".format(text_payload))
                     logger.debug(TAG, "TX forwarded to bridge: {} bytes".format(len(text_payload)))
         except Exception as e:

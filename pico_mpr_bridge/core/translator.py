@@ -148,16 +148,10 @@ def translate_lora_payload(raw_data, source_id="unknown"):
     """Parse a raw LoRa payload into a standard packet.
 
     Handles, in order:
-      1. Full JSON packet (from another bridge node)
-      2. JSON-encoded payload dict
-      3. CSV sensor format: 'T:25.3,H:60.5'  (Arduino DHT sensor)
-      4. Raw string fallback
+      1. JSON-encoded payload dict
+      2. CSV sensor format: 'T:25.3,H:60.5'  (Arduino DHT sensor)
+      3. Raw string fallback
     """
-    # 1. Try full JSON packet first
-    pkt = packet.decode_packet(raw_data)
-    if pkt:
-        return pkt
-
     # Decode bytes once for subsequent steps
     if isinstance(raw_data, (bytes, bytearray)):
         try:
@@ -165,14 +159,14 @@ def translate_lora_payload(raw_data, source_id="unknown"):
         except UnicodeError:
             raw_data = str(raw_data)
 
-    # 2. Try JSON-encoded payload dict
+    # 1. Try JSON-encoded payload dict
     try:
         payload = json.loads(raw_data)
     except ValueError:
-        # 3. Try Arduino-style CSV sensor format (e.g. "T:25.3,H:60.5")
+        # 2. Try Arduino-style CSV sensor format (e.g. "T:25.3,H:60.5")
         payload = _parse_csv_sensor(raw_data)
         if not payload:
-            # 4. Last resort: preserve raw string
+            # 3. Last resort: preserve raw string
             payload = {"raw": raw_data}
 
     priority = packet.classify_priority(payload)

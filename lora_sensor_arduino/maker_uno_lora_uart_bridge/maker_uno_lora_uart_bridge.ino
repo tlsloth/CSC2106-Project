@@ -41,72 +41,12 @@
 #endif
 
 // Protocol
-#define PACKET_START 0xCB
-#define MY_NODE_ID 'bridge_01'
-#define MSG_TYPE_DATA 0x01
-#define MSG_TYPE_ACK 0x02
-#define HEADER_SIZE 6
-#define MAX_PAYLOAD 20
-#define ACK_DELAY_MS 40
-// Lab mode: accept DATA packets regardless of destination ID.
-// Set to false for strict destination filtering.
-#define ACCEPT_ANY_DST true
 #define UART_LINE_MAX 200
-
-struct Packet
-{
-  uint8_t start;
-  uint8_t from;
-  uint8_t to;
-  uint8_t type;
-  uint8_t seq;
-  uint8_t len;
-  uint8_t payload[MAX_PAYLOAD];
-  uint8_t checksum;
-};
 
 RH_RF95 rf95(RFM95_CS, RFM95_INT);
 
 char uartLine[UART_LINE_MAX];
 uint16_t uartLineLen = 0;
-
-uint8_t calculateChecksum(Packet *pkt)
-{
-  uint8_t cs = pkt->start ^ pkt->from ^ pkt->to ^ pkt->type ^ pkt->seq ^ pkt->len;
-  for (uint8_t i = 0; i < pkt->len; i++)
-  {
-    cs ^= pkt->payload[i];
-  }
-  return cs;
-}
-
-bool deserializePacket(uint8_t *buf, uint8_t bufLen, Packet *pkt)
-{
-  if (bufLen < HEADER_SIZE + 1)
-    return false;
-  if (buf[0] != PACKET_START)
-    return false;
-
-  pkt->start = buf[0];
-  pkt->from = buf[1];
-  pkt->to = buf[2];
-  pkt->type = buf[3];
-  pkt->seq = buf[4];
-  pkt->len = buf[5];
-
-  if (pkt->len > MAX_PAYLOAD)
-    return false;
-  if (bufLen < HEADER_SIZE + pkt->len + 1)
-    return false;
-
-  for (uint8_t i = 0; i < pkt->len; i++)
-  {
-    pkt->payload[i] = buf[HEADER_SIZE + i];
-  }
-  pkt->checksum = buf[HEADER_SIZE + pkt->len];
-
-  return (calculateChecksum(pkt) == pkt->checksum);
-}
 
 bool isLikelyTextPayload(const uint8_t *buf, uint8_t len)
 {
@@ -193,55 +133,30 @@ void sendRawLoRaPayload(const char *payload)
   }
 }
 
-void sendJoinAckFromBridge(bool accepted, const char *bridgeId, const char *nodeId)
+void sendJoinAckFromBridge(bool accepted, const char *bridgeId, const char *nodeId, const char *token)
 {
   (void)nodeId;
-  const char payload[] =
-      "{\"type\":\"join_ack\",\"accepted\":true,\"bridge_id\":\"bridge_01\"}";
-
-  size_t payloadLen = strlen(payload);
-  DBG_PRINT(F("Bridge TX test len="));
-  DBG_PRINTLN((unsigned int)payloadLen);
-  DBG_PRINTLN("Join request acknowleding for you boss!");
-  rf95.setModeIdle();
-  rf95.send((uint8_t *)payload, payloadLen);
-
-  unsigned long start = millis();
-  bool txOk = false;
-  while (!rf95.waitPacketSent(100))
+  char payload[220];
+  if (token && token[0])
   {
-    if (millis() - start > 3000)
-    {
-      break;
-    }
+    snprintf(
+        payload,
+        sizeof(payload),
+        "{\"type\":\"join_ack\",\"accepted\":%s,\"bridge_id\":\"%s\",\"token\":\"%s\"}",
+        accepted ? "true" : "false",
+        (bridgeId && bridgeId[0]) ? bridgeId : "bridge_01",
+        token);
   }
-  txOk = (millis() - start <= 3000);
-
-  rf95.setModeRx();
-
-  DBG_PRINT(F("Bridge TX test result="));
-  DBG_PRINTLN(txOk ? F("OK") : F("TIMEOUT"));
-}
-
-void forwardLegacyPacketToPico(Packet *pkt, int16_t rssi)
-{
-  char raw[MAX_PAYLOAD + 1];
-  memcpy(raw, pkt->payload, pkt->len);
-  raw[pkt->len] = '\0';
-
-  // JSON line expected by pico_mpr_bridge/interfaces/uart_lora_interface.py
-  char json[120];
-  snprintf(
-      json,
-      sizeof(json),
-      "{\"raw\":\"%s\",\"node\":\"%c\",\"rssi\":%d}",
-      raw,
-      (char)pkt->from,
-      (int)rssi);
-
-  sendPicoLine(json);
-  DBG_PRINT(F("Forwarded legacy: "));
-  DBG_PRINTLN(json);
+  else
+  {
+    snprintf(
+        payload,
+        sizeof(payload),
+        "{\"type\":\"join_ack\",\"accepted\":%s,\"bridge_id\":\"%s\"}",
+        accepted ? "true" : "false",
+        (bridgeId && bridgeId[0]) ? bridgeId : "bridge_01");
+  }
+  sendRawLoRaPayload(payload);
 }
 
 void forwardRawFrameToPico(uint8_t *buf, uint8_t len, int16_t rssi)
@@ -298,8 +213,15 @@ void processPicoLine(char *line)
     *sep2 = '\0';
 
     char *nodeId = sep2 + 1;
+    char *token = (char *)"";
+    char *sep3 = findNthChar(nodeId, '|', 1);
+    if (sep3)
+    {
+      *sep3 = '\0';
+      token = sep3 + 1;
+    }
     bool accepted = (acceptedText[0] == '1');
-    sendJoinAckFromBridge(accepted, bridgeId, nodeId);
+    sendJoinAckFromBridge(accepted, bridgeId, nodeId, token);
     return;
   }
 
@@ -359,35 +281,6 @@ void pollLoraRx()
   DBG_PRINT((unsigned int)len);
   DBG_PRINT(F(" rssi="));
   DBG_PRINTLN((int)rssi);
-  Packet pkt;
-
-  if (deserializePacket(buf, len, &pkt))
-  {
-    bool forThisBridge = (pkt.to == MY_NODE_ID || pkt.to == 0xFF);
-    bool shouldProcess = (pkt.type == MSG_TYPE_DATA) && (forThisBridge || ACCEPT_ANY_DST);
-
-    if (shouldProcess)
-    {
-      sendAck(&pkt);
-      forwardLegacyPacketToPico(&pkt, rssi);
-    }
-    else if (pkt.type == MSG_TYPE_DATA)
-    {
-      DBG_PRINT(F("Data packet ignored (dst="));
-      DBG_PRINT((char)pkt.to);
-      DBG_PRINTLN(F(")"));
-    }
-    return;
-  }
-
-  // If it looks like our legacy binary framing but checksum/length is bad,
-  // drop it instead of forwarding binary garbage as text to Pico.
-  if (len >= (HEADER_SIZE + 1) && buf[0] == PACKET_START)
-  {
-    DBG_PRINTLN(F("Dropped malformed legacy-style packet"));
-    return;
-  }
-
   // Forward only text-like payloads on the LORA_RX text channel.
   if (!isLikelyTextPayload(buf, len))
   {
@@ -395,37 +288,8 @@ void pollLoraRx()
     return;
   }
 
-  // Not a legacy binary packet -> treat as raw/text LoRa payload.
+  // JSON/text-only LoRa pipeline.
   forwardRawFrameToPico(buf, len, rssi);
-}
-
-void sendAck(Packet *rxPkt)
-{
-  Packet ack;
-  ack.start = PACKET_START;
-  ack.from = MY_NODE_ID;
-  ack.to = rxPkt->from;
-  ack.type = MSG_TYPE_ACK;
-  ack.seq = rxPkt->seq;
-  ack.len = 0;
-  ack.checksum = calculateChecksum(&ack);
-
-  uint8_t buf[7] = {
-      ack.start, ack.from, ack.to,
-      ack.type, ack.seq, ack.len, ack.checksum};
-
-  // Delay ACK slightly so sender has time to switch from TX to RX.
-  delay(ACK_DELAY_MS);
-
-  rf95.send(buf, sizeof(buf));
-  if (!rf95.waitPacketSent(1500))
-  {
-    DBG_PRINTLN(F("ACK TX TIMEOUT - resetting LoRa"));
-    rf95.setModeIdle();
-  }
-  rf95.setModeRx();
-
-  DBG_PRINTLN(F("ACK sent"));
 }
 
 void setup()

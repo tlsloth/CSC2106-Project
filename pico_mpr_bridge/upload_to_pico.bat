@@ -11,7 +11,7 @@ echo.
 echo [1/6] Checking mpremote...
 where mpremote >nul 2>nul
 if errorlevel 1 (
-    echo ERROR: mpremote not found.
+    echo ERROR: mpremote not found. 
     echo Install with: pip install mpremote
     exit /b 1
 )

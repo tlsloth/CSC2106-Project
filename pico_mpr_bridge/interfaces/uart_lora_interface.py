@@ -14,6 +14,14 @@ _uart = None
 _rx_buf = b""
 
 
+def _json_dumps(obj):
+    # Keep UART lines compact; fallback for runtimes that don't support separators.
+    try:
+        return json.dumps(obj, separators=(",", ":"))
+    except TypeError:
+        return json.dumps(obj)
+
+
 def _extract_source_id(payload_bytes):
     try:
         if isinstance(payload_bytes, (bytes, bytearray)):
@@ -24,6 +32,64 @@ def _extract_source_id(payload_bytes):
         return msg.get("src") or msg.get("node_id") or "lora_uart"
     except Exception:
         return "lora_uart"
+
+
+def _parse_json_message(payload_bytes):
+    try:
+        if isinstance(payload_bytes, (bytes, bytearray)):
+            payload_text = payload_bytes.decode("utf-8")
+        else:
+            payload_text = str(payload_bytes)
+        return json.loads(payload_text)
+    except Exception:
+        return None
+
+
+def _check_join_auth(msg):
+    network = msg.get("network") or msg.get("network_name")
+    if network != getattr(config, "MESH_NETWORK_NAME", ""):
+        return False, "network_mismatch"
+
+    expected_key = getattr(config, "MESH_JOIN_KEY", "")
+    provided_key = msg.get("auth") or msg.get("key") or ""
+    if expected_key and provided_key != expected_key:
+        return False, "auth_failed"
+
+    return True, "ok"
+
+
+def _send_join_ack(req_msg, accepted, reason="ok"):
+    node_id = str(req_msg.get("node_id") or req_msg.get("src") or "unknown")
+    logger.info(
+        TAG,
+        "TX join_ack to {} accepted={} reason={} via UART bridge command".format(
+            node_id,
+            bool(accepted),
+            reason,
+        ),
+    )
+    _send_line(
+        "LORA_JOIN_ACK|{}|{}|{}".format(
+            1 if accepted else 0,
+            config.NODE_ID,
+            node_id,
+        )
+    )
+
+
+def _send_route_response(query_msg, route):
+    response = {
+        "type": "route_resp",
+        "node_id": config.NODE_ID,
+        "req_src": query_msg.get("src") or query_msg.get("node_id", "unknown"),
+        "dst": query_msg.get("dst", "unknown"),
+        "status": "ok" if route else "no_route",
+        "next_hop": route["next_hop"] if route else None,
+        "via_protocol": route["via_protocol"] if route else None,
+        "cost": route["cost"] if route else None,
+        "seq": query_msg.get("seq", 0),
+    }
+    _send_line("LORA_TX|{}".format(_json_dumps(response)))
 
 
 def _parse_line(raw_line):
@@ -92,7 +158,12 @@ def _parse_line(raw_line):
 def _send_line(text):
     if _uart is None:
         raise OSError("UART bridge not initialised")
-    _uart.write((text + "\n").encode("utf-8"))
+    out = (text + "\n").encode("utf-8")
+    written = _uart.write(out)
+    if written is None:
+        logger.warn(TAG, "UART write returned None")
+    elif written != len(out):
+        logger.warn(TAG, "UART partial write: {}/{} bytes".format(written, len(out)))
 
 
 def init():
@@ -128,10 +199,10 @@ def is_available():
     return _uart is not None
 
 
-async def rx_task(ingress_queue, neighbour_table):
+async def rx_task(ingress_queue, neighbour_table, routing_table=None):
     import uasyncio as asyncio
     from core.translator import translate_lora_payload
-    global _rx_buf
+    global _rx_buf, _uart
 
     logger.info(TAG, "LoRa-over-UART RX task started")
 
@@ -188,6 +259,32 @@ async def rx_task(ingress_queue, neighbour_table):
                                     rssi=parsed.get("rssi", 0),
                                     capabilities=["LoRa"],
                                 )
+
+                            msg = _parse_json_message(payload)
+                            if isinstance(msg, dict) and msg.get("type") == "join_req":
+                                ok, reason = _check_join_auth(msg)
+                                if ok:
+                                    node_id = str(msg.get("node_id") or source_id)
+                                    neighbour_table.update(
+                                        node_id,
+                                        protocols=["LoRa"],
+                                        rssi=parsed.get("rssi", 0),
+                                        capabilities=msg.get("capabilities", ["LoRa"]),
+                                    )
+                                    logger.info(TAG, "Join accepted for {}".format(node_id))
+                                else:
+                                    logger.warn(TAG, "Join rejected for {} ({})".format(source_id, reason))
+                                _send_join_ack(msg, ok, reason=reason)
+                                continue
+
+                            if isinstance(msg, dict) and msg.get("type") == "route_query":
+                                route = None
+                                if routing_table is not None:
+                                    dst = msg.get("dst")
+                                    if dst:
+                                        route = routing_table.lookup(dst)
+                                _send_route_response(msg, route)
+                                continue
 
                             hello = parse_hello(payload)
                             if hello:

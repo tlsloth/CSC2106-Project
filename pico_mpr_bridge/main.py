@@ -48,9 +48,6 @@ def _load_lora_interface():
         from interfaces import uart_lora_interface
         return transport, uart_lora_interface
 
-    if transport == "I2C":
-        from interfaces import i2c_lora_interface
-        return transport, i2c_lora_interface
 
     from interfaces import lora_interface
     return transport, lora_interface
@@ -228,8 +225,12 @@ def main():
             should_run_lora_tasks = True
 
         if should_run_lora_tasks:
-            tasks.append(asyncio.create_task(
-                lora_module.rx_task(ingress_queue, neighbour_table)))
+            if lora_transport == "UART":
+                tasks.append(asyncio.create_task(
+                    lora_module.rx_task(ingress_queue, neighbour_table, routing_table)))
+            else:
+                tasks.append(asyncio.create_task(
+                    lora_module.rx_task(ingress_queue, neighbour_table)))
             tasks.append(asyncio.create_task(
                 lora_module.tx_task(lora_egress)))
             if getattr(config, "ENABLE_LORA_HELLO", False):

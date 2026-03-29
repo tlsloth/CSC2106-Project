@@ -3,7 +3,7 @@
 # Node identity
 NODE_ID         = "bridge_01"
 NODE_ROLE       = "bridge"          # "bridge" | "sensor" | "dashboard"
-CAPABILITIES    = ["LoRa", "BLE", "WiFi", "MQTT"]
+CAPABILITIES    = ["LoRa"] #["LoRa", "BLE", "WiFi", "MQTT"]
 
 # WiFi credentials
 WIFI_SSID       = "SINGTEL-93KM"
@@ -23,6 +23,11 @@ HELLO_INTERVAL  = 15                # seconds between Hello broadcasts
 HELLO_TIMEOUT   = 45                # 3x interval -> declare neighbour dead
 ENABLE_LORA_HELLO = False           # Sender endpoints may not consume hello frames
 ENABLE_WIFI_HELLO = True            # Keep MQTT/wifi topology discovery enabled
+
+# Mesh join/auth (LoRa edges)
+MESH_NETWORK_NAME = "CSC2106_MESH"  # Shared network identity for discovery/join
+MESH_JOIN_KEY     = "mesh_key_v1"   # Basic shared key for join acceptance
+JOIN_ACK_TIMEOUT_S = 20              # Optional: edge-side join timeout guidance
 
 # Cost model (cross-protocol translation costs)
 COST_NATIVE     = 1                 # LoRa->LoRa, WiFi->WiFi, BLE->BLE
@@ -61,25 +66,6 @@ UART_LORA_TX_PIN     = 0           # GP0
 UART_LORA_RX_PIN     = 1           # GP1
 UART_LORA_TIMEOUT_MS = 100
 
-# LoRa over I2C bridge parameters (Maker UNO + LoRa shield)
-I2C_LORA_ID         = 0
-I2C_LORA_SDA_PIN    = 4
-I2C_LORA_SCL_PIN    = 5
-I2C_LORA_FREQ       = 50000
-I2C_LORA_ADDR       = 0x42
-I2C_LORA_POLL_MS    = 100
-I2C_LORA_MAX_FRAME  = 200
-I2C_LORA_CHUNK      = 24
-I2C_LORA_RETRIES    = 3
-
-# LoRa SPI pin mapping (SX1276 RFM95W shield)
-LORA_SPI_ID     = 0
-LORA_PIN_SCK    = 18
-LORA_PIN_MOSI   = 19
-LORA_PIN_MISO   = 16
-LORA_PIN_CS     = 17
-LORA_PIN_RESET  = 20
-LORA_PIN_DIO0   = 21               # SX127x uses DIO0 (not DIO1)
 
 # BLE parameters (use 16-bit UUIDs for Pico W compatibility)
 BLE_SERVICE_UUID    = 0xFFF0       # BLE sensor service UUID

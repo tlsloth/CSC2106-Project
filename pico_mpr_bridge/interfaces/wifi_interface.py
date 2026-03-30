@@ -6,31 +6,25 @@ import config
 from utils import logger
 from core import packet
 from core.neighbour import create_hello_payload, parse_hello
-from core.security import check_join_auth, check_node_token, generate_join_token
+# Removed security imports to simplify data routing first; can add back later if needed
 
-_node_tokens = {}
-
-TAG = "WiFi"
+TAG = "WiFi-MQTT"
 
 _wlan = None
 _mqtt = None
-
+_pending_msgs = [] # Global queue for incoming MQTT messages
 
 def _wifi_status_text(status):
-    # MicroPython status values vary slightly by port; keep a safe fallback.
     mapping = {
-        0: "STAT_IDLE",
-        1: "STAT_CONNECTING",
-        2: "STAT_WRONG_PASSWORD",
-        3: "STAT_NO_AP_FOUND",
-        4: "STAT_CONNECT_FAIL",
-        5: "STAT_GOT_IP",
-        -1: "STAT_CONNECT_FAIL",
-        -2: "STAT_NO_AP_FOUND",
-        -3: "STAT_WRONG_PASSWORD",
+        0: "STAT_IDLE", 1: "STAT_CONNECTING", 2: "STAT_WRONG_PASSWORD",
+        3: "STAT_NO_AP_FOUND", 4: "STAT_CONNECT_FAIL", 5: "STAT_GOT_IP",
+        -1: "STAT_CONNECT_FAIL", -2: "STAT_NO_AP_FOUND", -3: "STAT_WRONG_PASSWORD",
     }
     return mapping.get(status, str(status))
 
+def _global_mqtt_callback(topic, msg):
+    """Unified global callback for all MQTT subscriptions."""
+    _pending_msgs.append((topic, msg))
 
 def init():
     """Connect to WiFi and initialise MQTT client."""
@@ -38,301 +32,193 @@ def init():
 
     try:
         import network
-
         _wlan = network.WLAN(network.STA_IF)
         _wlan.active(True)
+        
+        _wlan.config(pm=0)
 
         if not _wlan.isconnected():
             attempts = int(getattr(config, "WIFI_CONNECT_ATTEMPTS", 3) or 3)
-            timeout_s = int(getattr(config, "WIFI_CONNECT_TIMEOUT_S", 20) or 20)
-
             for attempt in range(1, attempts + 1):
-                logger.info(
-                    TAG,
-                    "Connecting to WiFi '{}' (attempt {}/{})...".format(
-                        config.WIFI_SSID,
-                        attempt,
-                        attempts,
-                    ),
-                )
-
-                try:
-                    _wlan.disconnect()
-                except Exception:
-                    pass
+                logger.info(TAG, f"Connecting to WiFi '{config.WIFI_SSID}' (attempt {attempt}/{attempts})...")
+                
+                try: _wlan.disconnect()
+                except: pass
 
                 _wlan.connect(config.WIFI_SSID, config.WIFI_PASSWORD)
 
-                timeout = timeout_s
+                timeout = 15
                 while not _wlan.isconnected() and timeout > 0:
                     time.sleep(1)
                     timeout -= 1
 
-                if _wlan.isconnected():
-                    break
-
-                status = _wifi_status_text(_wlan.status())
-                logger.warn(TAG, "WiFi attempt {} failed (status={})".format(attempt, status))
+                if _wlan.isconnected(): break
                 time.sleep(1)
 
         if _wlan.isconnected():
             ip = _wlan.ifconfig()[0]
-            logger.info(TAG, "WiFi connected, IP: {}".format(ip))
+            logger.info(TAG, f"WiFi connected, IP: {ip}")
         else:
-            status = _wifi_status_text(_wlan.status())
-            logger.error(TAG, "WiFi connection failed (status={})".format(status))
+            logger.error(TAG, f"WiFi connection failed (status={_wifi_status_text(_wlan.status())})")
             return False
 
     except Exception as e:
-        logger.error(TAG, "WiFi init failed: {}".format(e))
+        logger.error(TAG, f"WiFi init failed: {e}")
         return False
 
     # Initialise MQTT
     try:
         from umqtt.robust import MQTTClient
 
-        client_id = config.NODE_ID
+        client_id = getattr(config, "NODE_ID", "pico_bridge")
         _mqtt = MQTTClient(
             client_id,
             config.MQTT_BROKER,
-            port=config.MQTT_PORT,
-            keepalive=config.MQTT_KEEPALIVE,
+            port=getattr(config, "MQTT_PORT", 1883),
+            keepalive=getattr(config, "MQTT_KEEPALIVE", 60),
         )
 
-        if config.MQTT_USER:
+        if getattr(config, "MQTT_USER", ""):
             _mqtt.user = config.MQTT_USER
             _mqtt.pswd = config.MQTT_PASSWORD
 
+        _mqtt.set_callback(_global_mqtt_callback)
         _mqtt.connect()
-        logger.info(TAG, "MQTT connected to {}:{}".format(config.MQTT_BROKER, config.MQTT_PORT))
+        
+        _mqtt.sock.setblocking(False)
+        
+        logger.info(TAG, f"MQTT connected to {config.MQTT_BROKER}:{getattr(config, 'MQTT_PORT', 1883)}")
         return True
     except Exception as e:
-        logger.error(TAG, "MQTT init failed: {}".format(e))
+        logger.error(TAG, f"MQTT init failed: {e}")
         _mqtt = None
         return False
-
 
 def is_available():
     return _wlan is not None and _wlan.isconnected() and _mqtt is not None
 
-
 def mqtt_publish(topic, message, retain=False):
     """Publish a message to an MQTT topic."""
-    if _mqtt is None:
-        logger.warn(TAG, "MQTT not available, cannot publish")
-        return False
+    if _mqtt is None: return False
     try:
         if isinstance(message, str):
             message = message.encode("utf-8")
         _mqtt.publish(topic.encode("utf-8"), message, retain=retain)
-        logger.debug(
-            TAG,
-            "Published to {}: {} bytes (retain={})".format(topic, len(message), retain),
-        )
+        logger.debug(TAG, f"Published to {topic}")
         return True
     except Exception as e:
-        logger.error(TAG, "MQTT publish error: {}".format(e))
+        logger.error(TAG, f"MQTT publish error: {e}")
         _try_reconnect()
         return False
 
-
-def mqtt_subscribe(topic, callback):
-    """Subscribe to an MQTT topic with a callback."""
-    if _mqtt is None:
-        return False
+def mqtt_subscribe(topic):
+    """Subscribe to an MQTT topic (callback is handled globally)."""
+    if _mqtt is None: return False
     try:
-        _mqtt.set_callback(callback)
         _mqtt.subscribe(topic.encode("utf-8"))
-        logger.info(TAG, "Subscribed to {}".format(topic))
+        logger.info(TAG, f"Subscribed to {topic}")
         return True
     except Exception as e:
-        logger.error(TAG, "MQTT subscribe error: {}".format(e))
+        logger.error(TAG, f"MQTT subscribe error: {e}")
         return False
 
-
 def _try_reconnect():
-    """Attempt to reconnect MQTT."""
     global _mqtt
     try:
         if _mqtt:
             _mqtt.connect()
+            _mqtt.sock.setblocking(False) # Re-apply non-blocking on reconnect
             logger.info(TAG, "MQTT reconnected")
     except Exception as e:
-        logger.error(TAG, "MQTT reconnect failed: {}".format(e))
+        logger.error(TAG, f"MQTT reconnect failed: {e}")
         _mqtt = None
 
-
 async def tx_task(egress_queue):
-    """Async task: drain WiFi/MQTT egress queue and publish."""
+    """Async task: drain egress queue and publish to Dashboard."""
     import uasyncio as asyncio
-    from core.translator import translate_to_mqtt
-
-    logger.info(TAG, "WiFi TX task started")
+    logger.info(TAG, "WiFi/MQTT TX task started")
+    
     while True:
         try:
             if is_available() and not egress_queue.is_empty():
                 pkt = egress_queue.pop()
                 if pkt:
-                    result = translate_to_mqtt(pkt)
-                    if result:
-                        # Support single publish tuple and multi-publish list.
-                        if isinstance(result, list):
-                            for item in result:
-                                if isinstance(item, tuple):
-                                    topic = item[0]
-                                    payload_str = item[1]
-                                    retain = item[2] if len(item) > 2 else False
-                                    mqtt_publish(topic, payload_str, retain=retain)
-                        elif isinstance(result, tuple):
-                            topic = result[0]
-                            payload_str = result[1]
-                            retain = result[2] if len(result) > 2 else False
-                            mqtt_publish(topic, payload_str, retain=retain)
+                    msg_type = pkt.get("type", "")
+                    
+                    if msg_type in ["data", "sensor"]:
+                        node_id = pkt.get("src", "unknown")
+                        topic = f"mesh/data/{node_id}" # Matches your Flask app subscription
+                        
+                        # Inject this bridge's ID so the dashboard knows who routed it!
+                        pkt["hop_dst"] = getattr(config, "NODE_ID", "bridge")
+                        
+                        payload_str = json.dumps(pkt)
+                        mqtt_publish(topic, payload_str)
+                    
+                    # You can still use translator for other packet types if needed here
+                    # result = translate_to_mqtt(pkt) ...
+                    
         except Exception as e:
-            logger.error(TAG, "TX error: {}".format(e))
+            logger.error(TAG, f"TX error: {e}")
 
         await asyncio.sleep_ms(100)
-
 
 async def rx_task(ingress_queue, neighbour_table):
     """Async task: check for incoming MQTT command messages."""
     import uasyncio as asyncio
-    from core.translator import translate_from_mqtt
-
-    logger.info(TAG, "WiFi RX task started")
-
-    # Subscribe to command topic for this node
-    cmd_topic = config.MQTT_CMD_TOPIC.format(node_id=config.NODE_ID)
-
-    _pending_msgs = []
-
-    def _on_message(topic, msg):
-        _pending_msgs.append((topic, msg))
+    logger.info(TAG, "WiFi/MQTT RX task started")
 
     if is_available():
-        mqtt_subscribe(cmd_topic, _on_message)
-        # Also subscribe to hello topic
-        mqtt_subscribe(config.MQTT_HELLO_TOPIC, _on_message)
-        # Subscribe to topology broadcasts from other bridges
-        mqtt_subscribe("mesh/topology/#", _on_message)
+        # Subscribe to topics
+        cmd_topic = getattr(config, "MQTT_CMD_TOPIC", "mesh/cmd/{node_id}").format(node_id=config.NODE_ID)
+        mqtt_subscribe(cmd_topic)
+        mqtt_subscribe(getattr(config, "MQTT_HELLO_TOPIC", "mesh/hello"))
 
     while True:
         try:
             if _mqtt is not None:
-                _mqtt.check_msg()  # Non-blocking check
+                try:
+                    _mqtt.check_msg() # Now completely non-blocking!
+                except OSError:
+                    pass # Ignore standard non-blocking 'no data' errors
 
                 while _pending_msgs:
                     topic, msg = _pending_msgs.pop(0)
-                    if isinstance(topic, bytes):
-                        topic = topic.decode("utf-8")
+                    if isinstance(topic, bytes): topic = topic.decode("utf-8")
+                    if isinstance(msg, bytes): msg = msg.decode("utf-8")
 
                     # Handle hello messages
                     if "hello" in topic:
                         hello = parse_hello(msg)
                         if hello:
                             neighbour_table.update(
-                                hello["node_id"],
-                                protocols=["WiFi", "MQTT"],
-                                capabilities=hello.get("capabilities", ["WiFi", "MQTT"]),
+                                hello["node_id"], protocols=["WiFi", "MQTT"],
+                                capabilities=hello.get("capabilities", ["WiFi", "MQTT"])
                             )
                         continue
 
-                    # Handle topology broadcasts from other bridges
-                    if "topology" in topic:
-                        try:
-                            if isinstance(msg, (bytes, bytearray)):
-                                msg = msg.decode("utf-8")
-                            topo = json.loads(msg)
-                            remote_id = topo.get("node_id")
-                            remote_neighbours = topo.get("neighbours", {})
-                            if remote_id and remote_id != config.NODE_ID:
-                                neighbour_table.merge_remote(remote_id, remote_neighbours)
-                                logger.debug(TAG, "Merged topology from {}".format(remote_id))
-                        except Exception as e:
-                            logger.warn(TAG, "Failed to parse topology: {}".format(e))
-                        continue
-
-                    # Handle command/sensor messages from mesh nodes — validate before enqueuing
+                    # Put incoming commands into the ingress queue
                     try:
-                        if isinstance(msg, (bytes, bytearray)):
-                            msg_str = msg.decode("utf-8")
-                        else:
-                            msg_str = str(msg)
-                        msg_obj = json.loads(msg_str)
+                        msg_obj = json.loads(msg)
+                        ingress_queue.push(packet.PRIORITY_NORMAL, msg_obj)
                     except Exception:
-                        logger.warn(TAG, "Failed to parse MQTT message as JSON: {}".format(topic))
-                        continue
-                    
-                    msg_type = str(msg_obj.get("type") or "")
-                    msg_node_id = str(msg_obj.get("node_id") or msg_obj.get("src") or "unknown")
-                    
-                    # Validate: join_req with auth, or other packets with token
-                    if msg_type == "join_req":
-                        ok, reason = check_join_auth(
-                            msg_obj,
-                            getattr(config, "MESH_NETWORK_NAME", ""),
-                            getattr(config, "MESH_JOIN_KEY", ""),
-                        )
-                        if ok:
-                            token = generate_join_token(
-                                token_bytes=int(getattr(config, "MESH_JOIN_TOKEN_BYTES", 8) or 8),
-                                entropy_hint=len(_node_tokens),
-                            )
-                            _node_tokens[msg_node_id] = token
-                            logger.info(TAG, "Join accepted for {} via MQTT".format(msg_node_id))
-                        else:
-                            _node_tokens.pop(msg_node_id, None)
-                            logger.warn(TAG, "Join rejected for {} ({})".format(msg_node_id, reason))
-                        continue
-                    
-                    # For all other message types: token is mandatory
-                    if not msg_type:
-                        logger.warn(TAG, "MQTT message from {} has no type".format(msg_node_id))
-                        continue
-                    
-                    token_ok, token_reason = check_node_token(
-                        msg_obj,
-                        _node_tokens.get(msg_node_id),
-                        getattr(config, "MESH_JOIN_KEY", ""),
-                    )
-                    if not token_ok:
-                        logger.warn(TAG, "Dropped MQTT {} from {} ({})".format(
-                            msg_type, msg_node_id, token_reason))
-                        continue
-                    
-                    # Token validated; translate and enqueue
-                    pkt = translate_from_mqtt(topic, msg)
-                    if pkt:
-                        # Ensure src is from validated origin
-                        pkt["src"] = msg_node_id
-                        ingress_queue.push(pkt.get("priority", packet.PRIORITY_NORMAL), pkt)
+                        pass # Ignore malformed json
 
         except Exception as e:
-            logger.error(TAG, "RX error: {}".format(e))
+            logger.error(TAG, f"RX error: {e}")
 
-        await asyncio.sleep_ms(500)
-
+        await asyncio.sleep_ms(200)
 
 async def hello_task(neighbour_table):
-    """Async task: periodically publish Hello on MQTT."""
     import uasyncio as asyncio
-
-    logger.info(TAG, "WiFi Hello task started")
+    logger.info(TAG, "WiFi/MQTT Hello task started")
+    
     while True:
         try:
             if is_available():
                 hello = create_hello_payload()
-                mqtt_publish(config.MQTT_HELLO_TOPIC, json.dumps(hello))
-                logger.debug(TAG, "Sent MQTT Hello")
-
-                # Also publish topology
-                topo_topic = config.MQTT_TOPO_TOPIC.format(node_id=config.NODE_ID)
-                topo_data = json.dumps({
-                    "node_id": config.NODE_ID,
-                    "neighbours": neighbour_table.to_dict(),
-                })
-                mqtt_publish(topo_topic, topo_data)
-        except Exception as e:
-            logger.error(TAG, "Hello publish error: {}".format(e))
-
-        await asyncio.sleep(config.HELLO_INTERVAL)
+                topic = getattr(config, "MQTT_HELLO_TOPIC", "mesh/hello")
+                mqtt_publish(topic, json.dumps(hello))
+        except Exception:
+            pass
+        await asyncio.sleep(getattr(config, "HELLO_INTERVAL", 30))

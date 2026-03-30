@@ -227,10 +227,11 @@ def main():
         if should_run_lora_tasks:
             if lora_transport == "UART":
                 tasks.append(asyncio.create_task(
-                    lora_module.rx_task(ingress_queue, neighbour_table, routing_table)))
+                    lora_module.rx_task(ingress_queue, lora_egress, neighbour_table, routing_table)))
             else:
                 tasks.append(asyncio.create_task(
                     lora_module.rx_task(ingress_queue, neighbour_table)))
+                
             tasks.append(asyncio.create_task(
                 lora_module.tx_task(lora_egress)))
             if getattr(config, "ENABLE_LORA_HELLO", False):

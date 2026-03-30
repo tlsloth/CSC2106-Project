@@ -40,17 +40,19 @@ private:
   RH_RF95 &_radio;
   BridgeMeshConfig _config;
 
-  char _token[48];      // decrypted token (plain hex)
+  char _token[48]; // decrypted token (plain hex)
   char _bridgeId[20];
 
   bool _joined;
   bool _awaitingRouteResponse;
+  uint8_t _missedHelloAcks;
   uint8_t _seq;
 
   unsigned long _lastJoinTime;
   unsigned long _lastHelloTime;
   unsigned long _lastRouteQueryTime;
   unsigned long _routeQueryDeadline;
+  unsigned long _txHoldUntil;
 
   bool sendRaw(const char *payload);
   void handleControlMessage(const char *incoming);

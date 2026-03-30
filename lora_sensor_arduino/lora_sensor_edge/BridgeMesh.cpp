@@ -2,16 +2,23 @@
 #include <string.h>
 #include <stdio.h>
 
+static const unsigned long HELLO_RX_GUARD_MS = 350UL;
+static const unsigned long HELLO_JITTER_MS = 250UL;
+static const unsigned long HELLO_RETRY_AFTER_MISS_MS = 1200UL;
+static const uint8_t HELLO_ACK_MISS_THRESHOLD = 3;
+
 BridgeMesh::BridgeMesh(RH_RF95 &radio, const BridgeMeshConfig &config)
     : _radio(radio),
       _config(config),
       _joined(false),
       _awaitingRouteResponse(false),
+      _missedHelloAcks(0),
       _seq(0),
       _lastJoinTime(0),
       _lastHelloTime(0),
       _lastRouteQueryTime(0),
-      _routeQueryDeadline(0)
+      _routeQueryDeadline(0),
+      _txHoldUntil(0)
 {
   _token[0] = '\0';
   strncpy(_bridgeId, "bridge_01", sizeof(_bridgeId) - 1);
@@ -22,12 +29,15 @@ bool BridgeMesh::begin()
 {
   _joined = false;
   _awaitingRouteResponse = false;
+  _missedHelloAcks = 0;
   _seq = 0;
   _lastJoinTime = 0;
   _lastHelloTime = 0;
   _lastRouteQueryTime = 0;
   _routeQueryDeadline = 0;
+  _txHoldUntil = 0;
   _token[0] = '\0';
+  randomSeed(micros());
   return sendJoinRequest();
 }
 
@@ -94,12 +104,12 @@ bool BridgeMesh::decryptToken(const char *encoded, const char *key, char *out, s
     char hi = encoded[i * 2];
     char lo = encoded[i * 2 + 1];
 
-    uint8_t h = (hi >= '0' && hi <= '9') ? hi - '0'
+    uint8_t h = (hi >= '0' && hi <= '9')   ? hi - '0'
                 : (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10
-                                            : hi - 'A' + 10;
-    uint8_t l = (lo >= '0' && lo <= '9') ? lo - '0'
+                                           : hi - 'A' + 10;
+    uint8_t l = (lo >= '0' && lo <= '9')   ? lo - '0'
                 : (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10
-                                            : lo - 'A' + 10;
+                                           : lo - 'A' + 10;
 
     uint8_t b = ((h << 4) | l) ^ (uint8_t)key[i % keyLen];
     snprintf(out + i * 2, 3, "%02x", b);
@@ -187,7 +197,13 @@ bool BridgeMesh::sendHello()
   bool ok = sendRaw(payload);
   if (ok)
   {
-    _lastHelloTime = millis();
+    unsigned long now = millis();
+    _lastHelloTime = now;
+    // Liveness now relies on hello acknowledgements from the bridge.
+    _awaitingRouteResponse = true;
+    _routeQueryDeadline = now + _config.routeQueryTimeout;
+    // Stay in RX mode for a short guard window so hello_ack can be received.
+    _txHoldUntil = now + HELLO_RX_GUARD_MS;
   }
   return ok;
 }
@@ -195,6 +211,11 @@ bool BridgeMesh::sendHello()
 bool BridgeMesh::sendRouteQuery(const char *dst)
 {
   if (!_joined || !dst || !dst[0])
+  {
+    return false;
+  }
+
+  if ((long)(millis() - _txHoldUntil) < 0)
   {
     return false;
   }
@@ -229,8 +250,7 @@ bool BridgeMesh::sendRouteQuery(const char *dst)
     return false;
   }
 
-  _awaitingRouteResponse = true;
-  _routeQueryDeadline = millis() + _config.routeQueryTimeout;
+  // Route checks are best-effort and do not affect join/liveness state.
   _lastRouteQueryTime = millis();
   return true;
 }
@@ -238,6 +258,11 @@ bool BridgeMesh::sendRouteQuery(const char *dst)
 bool BridgeMesh::sendJsonObject(const char *jsonObject, const char *type)
 {
   if (!_joined || !jsonObject || jsonObject[0] != '{')
+  {
+    return false;
+  }
+
+  if ((long)(millis() - _txHoldUntil) < 0)
   {
     return false;
   }
@@ -257,7 +282,7 @@ bool BridgeMesh::sendJsonObject(const char *jsonObject, const char *type)
   int written = snprintf(
       packet,
       sizeof(packet),
-      "{\"type\":%s\",\"node_id\":\"%s\",\"token\":\"%s\",\"payload\":%s}",
+      "{\"type\":\"%s\",\"node_id\":\"%s\",\"token\":\"%s\",\"payload\":%s}",
       type,
       _config.nodeId,
       encToken,
@@ -284,9 +309,14 @@ void BridgeMesh::tick()
     return;
   }
 
-  if (_lastHelloTime == 0 || (now - _lastHelloTime >= _config.helloInterval))
+  if (!_awaitingRouteResponse && (_lastHelloTime == 0 || (now - _lastHelloTime >= _config.helloInterval)))
   {
     sendHello();
+    if (_lastHelloTime != 0)
+    {
+      unsigned long jitter = random(0, HELLO_JITTER_MS + 1);
+      _lastHelloTime += jitter;
+    }
   }
 
   if (_config.routeDst && _config.routeDst[0] != '\0')
@@ -299,11 +329,31 @@ void BridgeMesh::tick()
 
   if (_awaitingRouteResponse && (long)(now - _routeQueryDeadline) >= 0)
   {
-    _joined = false;
-    _token[0] = '\0';
     _awaitingRouteResponse = false;
     _routeQueryDeadline = 0;
-    _lastJoinTime = 0;
+    _txHoldUntil = 0;
+    _missedHelloAcks++;
+
+    if (_missedHelloAcks >= HELLO_ACK_MISS_THRESHOLD)
+    {
+      _joined = false;
+      _token[0] = '\0';
+      _lastJoinTime = 0;
+      _missedHelloAcks = 0;
+    }
+    else
+    {
+      // Retry hello after a short delay, but do not spam every loop.
+      if (_config.helloInterval > HELLO_RETRY_AFTER_MISS_MS)
+      {
+        _lastHelloTime = now - (_config.helloInterval - HELLO_RETRY_AFTER_MISS_MS);
+      }
+      else
+      {
+        _lastHelloTime = now;
+      }
+      _txHoldUntil = now + HELLO_RETRY_AFTER_MISS_MS;
+    }
   }
 }
 
@@ -336,9 +386,16 @@ void BridgeMesh::poll(unsigned long maxMs)
 
 void BridgeMesh::handleControlMessage(const char *incoming)
 {
-  if (!incoming || !incoming[0])
-    return;
+  if (!incoming || !incoming) return;
 
+  // Only care about explicit control types
+  if (!contains(incoming, "\"type\":\"join_ack\"") &&
+      !contains(incoming, "\"type\":\"hello_ack\"") &&
+      !contains(incoming, "\"type\":\"route_resp\"")) {
+    return;  // ignore sensor_data and random JSON
+  }
+
+  Serial.println(incoming);
   if (contains(incoming, "\"type\":\"join_ack\""))
   {
     char targetId[32];
@@ -372,6 +429,8 @@ void BridgeMesh::handleControlMessage(const char *incoming)
         _token[0] = '\0';
         _awaitingRouteResponse = false;
         _routeQueryDeadline = 0;
+        _txHoldUntil = 0;
+        _missedHelloAcks = 0;
         _lastJoinTime = 0;
         return;
       }
@@ -379,6 +438,8 @@ void BridgeMesh::handleControlMessage(const char *incoming)
       _joined = true;
       _awaitingRouteResponse = false;
       _routeQueryDeadline = 0;
+      _txHoldUntil = 0;
+      _missedHelloAcks = 0;
       _lastRouteQueryTime = 0;
     }
     else
@@ -387,12 +448,28 @@ void BridgeMesh::handleControlMessage(const char *incoming)
       _token[0] = '\0';
       _awaitingRouteResponse = false;
       _routeQueryDeadline = 0;
+      _txHoldUntil = 0;
+      _missedHelloAcks = 0;
     }
+  }
+  else if (contains(incoming, "\"type\":\"hello_ack\""))
+  {
+    char targetId[32];
+    targetId[0] = '\0';
+    extractJsonString(incoming, "target_id", targetId, sizeof(targetId));
+    if (targetId[0] && strcmp(targetId, _config.nodeId) != 0)
+    {
+      return;
+    }
+
+    _awaitingRouteResponse = false;
+    _routeQueryDeadline = 0;
+    _txHoldUntil = 0;
+    _missedHelloAcks = 0;
   }
   else if (contains(incoming, "\"type\":\"route_resp\""))
   {
-    _awaitingRouteResponse = false;
-    _routeQueryDeadline = 0;
+    // Route responses are informational only; ignore for liveness decisions.
   }
 }
 
@@ -482,8 +559,7 @@ bool BridgeMesh::isLikelyJsonText(const uint8_t *buf, uint8_t len)
   while (start < len && (buf[start] == ' ' || buf[start] == '\t' || buf[start] == '\r' || buf[start] == '\n'))
     start++;
 
-  if (start >= len || buf[start] != '{')
-    return false;
+  if (strstr((const char*)buf + start, "\"type\":\"") == nullptr) return false;
 
   int end = len - 1;
   while (end >= 0 && (buf[end] == ' ' || buf[end] == '\t' || buf[end] == '\r' || buf[end] == '\n'))

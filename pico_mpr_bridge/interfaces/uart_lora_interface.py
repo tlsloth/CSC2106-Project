@@ -7,6 +7,7 @@ import config
 from core.neighbour import create_hello_payload
 from core.security import check_join_auth, check_node_token, generate_join_token, xor_token_hex
 from utils import logger
+import uasyncio as asyncio
 
 TAG = "LoRaUART"
 DEFAULT_PRIORITY = 5
@@ -14,10 +15,11 @@ DEFAULT_PRIORITY = 5
 _uart = None
 _rx_buf = b""
 _node_tokens = {}
+radio_lock = asyncio.Lock()
+tx_done_event = asyncio.Event()
 
 
 def _json_dumps(obj):
-    # Keep UART lines compact; fallback for runtimes that don't support separators.
     try:
         return json.dumps(obj, separators=(",", ":"))
     except TypeError:
@@ -47,7 +49,18 @@ def _parse_json_message(payload_bytes):
         return None
 
 
-def _send_join_ack(req_msg, accepted, reason="ok", token=""):
+def _message_kind(msg):
+    kind = str(msg.get("kind") or "").strip().lower()
+    if kind in ("control", "data"):
+        return kind
+
+    msg_type = str(msg.get("type") or "").strip().lower()
+    if msg_type in ("join_req", "join_ack", "hello", "hello_ack", "route_query", "route_resp"):
+        return "control"
+    return "data"
+
+
+def _send_join_ack(req_msg, accepted, egress_queue, reason="ok", token=""):
     node_id = str(req_msg.get("node_id") or req_msg.get("src") or "unknown")
     logger.info(
         TAG,
@@ -58,20 +71,26 @@ def _send_join_ack(req_msg, accepted, reason="ok", token=""):
         ),
     )
     encrypted_token = xor_token_hex(token, getattr(config, "MESH_JOIN_KEY", "")) if token else ""
-    _send_line(
-        "LORA_JOIN_ACK|{}|{}|{}|{}".format(
-            1 if accepted else 0,
-            config.NODE_ID,
-            node_id,
-            encrypted_token,
-        )
-    )
+    # create json packet here, then pass to bridge to do TX only
+    ack = {
+        "kind": "control",
+        "type": "join_ack",
+        "accepted": bool(accepted),
+        "src": config.NODE_ID,
+        "bridge_id": config.NODE_ID,
+        "dst": node_id,
+        "reason": reason,
+        "token": encrypted_token,
+    }
+    egress_queue.push(DEFAULT_PRIORITY, ack)
 
 
-def _send_route_response(query_msg, route):
+def _send_route_response(query_msg, route, egress_queue):
     response = {
+        "kind": "control",
         "type": "route_resp",
         "node_id": config.NODE_ID,
+        "src": config.NODE_ID,
         "req_src": query_msg.get("src") or query_msg.get("node_id", "unknown"),
         "dst": query_msg.get("dst", "unknown"),
         "status": "ok" if route else "no_route",
@@ -80,7 +99,21 @@ def _send_route_response(query_msg, route):
         "cost": route["cost"] if route else None,
         "seq": query_msg.get("seq", 0),
     }
-    _send_line("LORA_TX|{}".format(_json_dumps(response)))
+    egress_queue.push(DEFAULT_PRIORITY, response)
+
+
+def _send_hello_ack(msg, egress_queue):
+    node_id = str(msg.get("node_id") or msg.get("src") or "unknown")
+    logger.debug(TAG, f"Queueing hello_ack to target_id: {node_id}")
+
+    ack = {
+        "kind": "control",
+        "type": "hello_ack",
+        "target_id": node_id,
+        "bridge_id": config.NODE_ID
+    }
+
+    egress_queue.push(DEFAULT_PRIORITY, ack)
 
 
 def _parse_line(raw_line):
@@ -88,8 +121,6 @@ def _parse_line(raw_line):
     if not line:
         return None
 
-    # JSON format: {"raw": "T:25.3,H:60.5", "node": "A", "rssi": -75}
-    # This is the format produced by lora_uart_bridge.py-compatible Arduino firmware.
     if line.startswith('{'):
         try:
             obj = json.loads(line)
@@ -106,9 +137,6 @@ def _parse_line(raw_line):
         except (ValueError, KeyError, TypeError):
             pass
 
-    # Pipe-delimited formats from UNO bridge:
-    # - LORA_RX|rssi|snr|payload
-    # - LORA_RX|rssi|snr|node|payload
     parts = line.split("|", 4)
     kind = parts[0]
 
@@ -190,8 +218,7 @@ def is_available():
     return _uart is not None
 
 
-async def rx_task(ingress_queue, neighbour_table, routing_table=None):
-    import uasyncio as asyncio
+async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=None):
     from core.translator import translate_lora_payload
     global _rx_buf, _uart
 
@@ -200,7 +227,6 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
     while True:
         try:
             if _uart is None:
-                # Allow recovery if UART init fails once at startup.
                 if init():
                     logger.info(TAG, "UART recovered")
                 else:
@@ -213,7 +239,6 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
                 if chunk:
                     _rx_buf += chunk
 
-                    # Match lora_uart_bridge.py behavior: parse complete newline-delimited lines.
                     while b"\n" in _rx_buf:
                         line, _rx_buf = _rx_buf.split(b"\n", 1)
                         line = line.strip()
@@ -225,7 +250,11 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
                         except Exception:
                             text = str(line)
 
-                        logger.info(TAG, "UART RX: {}".format(text))
+                        logger.info(TAG, "Received through UART: {}".format(text))
+                        if "LORA_STATUS|TX_DONE" in text:
+                            tx_done_event.set()
+                            continue
+                        
 
                         parsed = _parse_line(text)
                         if not parsed:
@@ -237,8 +266,6 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
                             logger.warn(TAG, "Bridge error: {}".format(parsed["line"]))
                         elif parsed["type"] == "LORA_RX":
                             payload = parsed["payload"]
-                            # Use the explicit node field when present (JSON format), else
-                            # fall back to extracting source_id from the payload body.
                             source_id = parsed.get("node") or _extract_source_id(payload)
 
                             msg = _parse_json_message(payload)
@@ -247,10 +274,14 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
                                 continue
 
                             msg_type = str(msg.get("type") or "")
+                            if not msg_type:
+                                logger.warn(TAG, "Dropped packet from {} with no type".format(source_id))
+                                continue
+
+                            msg_kind = _message_kind(msg)
                             msg_node_id = str(msg.get("node_id") or msg.get("src") or source_id)
 
-                            # Packet acceptance: join_req with valid auth, or any other type with valid token
-                            if msg_type == "join_req":
+                            if msg_type == "join_req" and msg_kind == "control":
                                 ok, reason = check_join_auth(
                                     msg,
                                     getattr(config, "MESH_NETWORK_NAME", ""),
@@ -274,49 +305,52 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
                                 else:
                                     _node_tokens.pop(node_id, None)
                                     logger.warn(TAG, "Join rejected for {} ({})".format(source_id, reason))
-                                _send_join_ack(msg, ok, reason=reason, token=token)
+                                _send_join_ack(msg, ok, egress_queue, reason, token)
                                 continue
 
-                            # For all non-join_req packets: token is mandatory
-                            if not msg_type:
-                                logger.warn(TAG, "Dropped packet from {} with no type".format(msg_node_id))
-                                continue
-
-                            token_ok, token_reason = check_node_token(
-                                msg,
-                                _node_tokens.get(msg_node_id),
-                                getattr(config, "MESH_JOIN_KEY", ""),
-                            )
-                            if not token_ok:
-                                logger.warn(
-                                    TAG,
-                                    "Dropped {} from {} ({})".format(
-                                        msg_type,
-                                        msg_node_id,
-                                        token_reason,
-                                    ),
+                            if msg_kind == "control":
+                                token_ok, token_reason = check_node_token(
+                                    msg,
+                                    _node_tokens.get(msg_node_id),
+                                    getattr(config, "MESH_JOIN_KEY", ""),
                                 )
-                                continue
+                                if not token_ok:
+                                    logger.warn(
+                                        TAG,
+                                        "Dropped {} from {} ({})".format(
+                                            msg_type,
+                                            msg_node_id,
+                                            token_reason,
+                                        ),
+                                    )
+                                    continue
 
-                            # Token validated; now update neighbor and process packet
-                            neighbour_table.update(
-                                msg_node_id,
-                                protocols=["LoRa"],
-                                rssi=parsed.get("rssi", 0),
-                                capabilities=msg.get("capabilities", ["LoRa"]),
-                            )
+                                neighbour_table.update(
+                                    msg_node_id,
+                                    protocols=["LoRa"],
+                                    rssi=parsed.get("rssi", 0),
+                                    capabilities=msg.get("capabilities", ["LoRa"]),
+                                )
 
-                            if msg_type == "route_query":
-                                route = None
-                                if routing_table is not None:
+                                if msg_type == "route_query":
+                                    route = None
                                     dst = msg.get("dst")
-                                    if dst:
+                                    if dst == config.NODE_ID:
+                                        route = {
+                                            "next_hop": config.NODE_ID,
+                                            "via_protocol": "LOCAL",
+                                            "cost": 0,
+                                        }
+                                    elif routing_table is not None and dst:
                                         route = routing_table.lookup(dst)
-                                _send_route_response(msg, route)
-                                continue
-
-                            if msg_type == "hello":
-                                continue
+                                    logger.info(TAG, "route_query dst={} local_id={} route={}".format(dst, config.NODE_ID, route))
+                                    _send_route_response(msg, route,egress_queue)
+                                    continue
+                                
+                                if msg_type == "hello":
+                                    _send_hello_ack(msg,egress_queue)
+                                if msg_type in ("hello", "hello_ack", "join_ack", "route_resp"):
+                                    continue
 
                             pkt = translate_lora_payload(
                                 payload,
@@ -333,7 +367,6 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
 
         except Exception as e:
             logger.error(TAG, "RX error: {}".format(e))
-            # Force a clean re-init path on next loop if UART gets wedged.
             try:
                 if _uart is not None:
                     _uart.deinit()
@@ -343,10 +376,8 @@ async def rx_task(ingress_queue, neighbour_table, routing_table=None):
 
         await asyncio.sleep_ms(20)
 
-
+# Used to pass from pico to another lora device
 async def tx_task(egress_queue):
-    import uasyncio as asyncio
-
     logger.info(TAG, "LoRa-over-UART TX task started")
     while True:
         try:
@@ -354,20 +385,29 @@ async def tx_task(egress_queue):
                 pkt = egress_queue.pop()
                 if pkt:
                     if isinstance(pkt, dict):
+                        if "kind" not in pkt:
+                            pkt["kind"] = "data"
                         text_payload = _json_dumps(pkt)
                     elif isinstance(pkt, (bytes, bytearray)):
                         text_payload = pkt.decode("utf-8", "ignore")
                     else:
                         text_payload = str(pkt)
-                    _send_line("LORA_TX|{}".format(text_payload))
-                    logger.debug(TAG, "TX forwarded to bridge: {} bytes".format(len(text_payload)))
+                    async with radio_lock:
+                        tx_done_event.clear()
+                        _send_line(f"LORA_TX|{text_payload}")
+                        logger.debug(TAG, f"Commanded Uno to TX:{len(text_payload)} bytes")
+                        try:
+                            await asyncio.wait_for(tx_done_event.wait(),timeout=5.0)
+                            logger.debug(TAG,"Uno confirmed TX completion")
+                        except asyncio.TimeoutError:
+                            logger.warn(TAG, "Timeout waiting for Uno TX_DONE confirmation. Releasing lock...")
         except Exception as e:
             logger.error(TAG, "TX error: {}".format(e))
 
-        await asyncio.sleep_ms(200)
+        await asyncio.sleep_ms(50)
 
-
-async def hello_task(neighbour_table):
+# Proof that bridge is still alive to neighbouring bridges
+async def hello_task(neighbour_table, egress_queue):
     import uasyncio as asyncio
 
     logger.info(TAG, "LoRa-over-UART Hello task started")
@@ -375,9 +415,11 @@ async def hello_task(neighbour_table):
         try:
             if _uart is not None:
                 hello = create_hello_payload()
-                _send_line("LORA_TX|{}".format(json.dumps(hello)))
+                if isinstance(hello, dict) and "kind" not in hello:
+                    hello["kind"] = "control"
+                egress_queue.push(DEFAULT_PRIORITY+1, hello)
                 logger.debug(TAG, "Sent LoRa Hello via UART bridge")
         except Exception as e:
             logger.error(TAG, "Hello broadcast error: {}".format(e))
 
-        await asyncio.sleep(config.HELLO_INTERVAL)
+        await asyncio.sleep(getattr(config, "HELLO_INTERVAL", 30))

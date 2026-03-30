@@ -29,6 +29,7 @@ def init():
         import network
         wlan = network.WLAN(network.STA_IF)
         wlan.active(True)
+        wlan.config(pm=0xa11140)
 
         # 1. Force WiFi Connection first!
         if not wlan.isconnected():
@@ -129,6 +130,7 @@ async def rx_task(ingress_queue, neighbour_table):
                     pass 
 
                 if data:
+                    logger.debug(TAG, f"Raw RX from {addr}: {data}")
                     msg_str = data.decode('utf-8')
                     try:
                         msg_obj = json.loads(msg_str)

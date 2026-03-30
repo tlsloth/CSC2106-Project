@@ -50,16 +50,16 @@ def init():
         ip, netmask, gw, dns = wlan.ifconfig()
         logger.info(TAG, f"WiFi Connected! IP: {ip}")
         
-        ip_parts = [int(x) for x in ip.split('.')]
-        nm_parts = [int(x) for x in netmask.split('.')]
-        bc_parts = [(ip_parts[i] | (~nm_parts[i] & 255)) for i in range(4)]
-        BROADCAST_IP = '.'.join([str(x) for x in bc_parts])
+        #ip_parts = [int(x) for x in ip.split('.')]
+        #nm_parts = [int(x) for x in netmask.split('.')]
+        #bc_parts = [(ip_parts[i] | (~nm_parts[i] & 255)) for i in range(4)]
+        #BROADCAST_IP = '.'.join([str(x) for x in bc_parts])
         logger.info(TAG, f"Subnet Broadcast Target calculated: {BROADCAST_IP}")
 
         # 2. Bind the RX Socket (Listen everywhere)
         _sock_rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         _sock_rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        _sock_rx.bind(('', UDP_PORT))
+        _sock_rx.bind(('0.0.0.0', UDP_PORT))
         _sock_rx.setblocking(False)
 
         # 3. Bind the TX Socket (Explicitly tied to the Pico's IP)
@@ -130,7 +130,6 @@ async def rx_task(ingress_queue, neighbour_table):
                     pass 
 
                 if data:
-                    logger.debug(TAG, f"Raw RX from {addr}: {data}")
                     msg_str = data.decode('utf-8')
                     try:
                         msg_obj = json.loads(msg_str)

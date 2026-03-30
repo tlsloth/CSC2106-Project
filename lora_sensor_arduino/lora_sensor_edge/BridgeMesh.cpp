@@ -2,8 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 
-static const unsigned long HELLO_RX_GUARD_MS = 350UL;
-static const unsigned long HELLO_JITTER_MS = 250UL;
+static const unsigned long HELLO_RX_GUARD_MS = 2000UL;
 static const unsigned long HELLO_RETRY_AFTER_MISS_MS = 1200UL;
 static const uint8_t HELLO_ACK_MISS_THRESHOLD = 3;
 
@@ -119,6 +118,7 @@ bool BridgeMesh::decryptToken(const char *encoded, const char *key, char *out, s
 
 bool BridgeMesh::sendJoinRequest()
 {
+  Serial.println("Trying to connect to mesh...");
   char payload[180];
 
   uint8_t seq = _seq++;
@@ -127,20 +127,7 @@ bool BridgeMesh::sendJoinRequest()
   snprintf(authHex, sizeof(authHex), "%08lx", (unsigned long)fnv1a32(_config.joinKey));
 
   int written;
-  if (_token[0] != '\0')
-  {
-    written = snprintf(
-        payload,
-        sizeof(payload),
-        "{\"type\":\"join_req\",\"node_id\":\"%s\",\"network\":\"%s\",\"auth\":\"%s\",\"token\":\"%s\",\"seq\":%u}",
-        _config.nodeId,
-        _config.networkName,
-        authHex,
-        _token,
-        (unsigned)seq);
-  }
-  else
-  {
+
     written = snprintf(
         payload,
         sizeof(payload),
@@ -149,12 +136,12 @@ bool BridgeMesh::sendJoinRequest()
         _config.networkName,
         authHex,
         (unsigned)seq);
-  }
 
   if (written <= 0 || written >= (int)sizeof(payload))
   {
     return false;
   }
+  Serial.println(payload);
 
   bool ok = sendRaw(payload);
   if (ok)
@@ -312,11 +299,6 @@ void BridgeMesh::tick()
   if (!_awaitingRouteResponse && (_lastHelloTime == 0 || (now - _lastHelloTime >= _config.helloInterval)))
   {
     sendHello();
-    if (_lastHelloTime != 0)
-    {
-      unsigned long jitter = random(0, HELLO_JITTER_MS + 1);
-      _lastHelloTime += jitter;
-    }
   }
 
   if (_config.routeDst && _config.routeDst[0] != '\0')
@@ -361,10 +343,12 @@ void BridgeMesh::poll(unsigned long maxMs)
 {
   unsigned long start = millis();
 
-  while ((millis() - start) < maxMs)
+while ((millis() - start) < maxMs)
   {
-    if (!_radio.available())
-      break;
+    if (!_radio.available()) {
+      delay(1);
+      continue; 
+    }
 
     uint8_t recvBuf[RH_RF95_MAX_MESSAGE_LEN + 1];
     uint8_t recvLen = RH_RF95_MAX_MESSAGE_LEN;
@@ -386,7 +370,9 @@ void BridgeMesh::poll(unsigned long maxMs)
 
 void BridgeMesh::handleControlMessage(const char *incoming)
 {
-  if (!incoming || !incoming) return;
+  if (!incoming || !incoming[0]) return;
+
+  Serial.println(incoming);
 
   // Only care about explicit control types
   if (!contains(incoming, "\"type\":\"join_ack\"") &&
@@ -395,7 +381,6 @@ void BridgeMesh::handleControlMessage(const char *incoming)
     return;  // ignore sensor_data and random JSON
   }
 
-  Serial.println(incoming);
   if (contains(incoming, "\"type\":\"join_ack\""))
   {
     char targetId[32];
@@ -441,6 +426,7 @@ void BridgeMesh::handleControlMessage(const char *incoming)
       _txHoldUntil = 0;
       _missedHelloAcks = 0;
       _lastRouteQueryTime = 0;
+      _lastHelloTime = millis();
     }
     else
     {

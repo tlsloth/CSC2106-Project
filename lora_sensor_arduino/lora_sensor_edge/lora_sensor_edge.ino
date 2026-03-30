@@ -19,10 +19,10 @@ BridgeMeshConfig meshConfig = {
     "CSC2106_MESH",
     "mesh_key_v1",
     "dashboard",
-    10000UL,
-    5000UL,
-    15000UL,
-    10000UL
+    10000UL, // joinInterval
+    15000UL, // helloInterval
+    15000UL, // routeQueryInterval
+    3000UL   // routeQueryTimeout
 };
 
 BridgeMesh mesh(rf95, meshConfig);
@@ -30,14 +30,14 @@ BridgeMesh mesh(rf95, meshConfig);
 unsigned long lastTelemetryTime = 0;
 const unsigned long TELEMETRY_INTERVAL = 5000UL;
 
-void sendTelemetry()
+bool sendTelemetry()
 {
   float humidity = dht.readHumidity();
   float temperature = dht.readTemperature();
 
   if (isnan(humidity) || isnan(temperature))
   {
-    return;
+    return false;
   }
 
   char tempStr[12];
@@ -57,10 +57,17 @@ void sendTelemetry()
 
   if (written <= 0 || written >= (int)sizeof(json))
   {
-    return;
+    return false;
   }
 
-  mesh.sendJsonObject(json, type);
+  bool success = mesh.sendJsonObject(json, type);
+  if (success)
+  {
+    Serial.print("TX Telemetry: ");
+    Serial.println(json);
+  }
+
+  return success;
 }
 
 void setup()
@@ -78,12 +85,18 @@ void setup()
 
   if (!rf95.init())
   {
-    while (1) {}
+    Serial.println("LoRa Init Failed");
+    while (1)
+    {
+    }
   }
 
   if (!rf95.setFrequency(RF95_FREQ))
   {
-    while (1) {}
+    Serial.println("LoRa Freq Failed");
+    while (1)
+    {
+    }
   }
 
   rf95.setTxPower(13, false);

@@ -1,18 +1,18 @@
 # config.py — All tuneable parameters for the MPR Bridge
 
 # Node identity
-NODE_ID         = "bridge_01"
+NODE_ID         = "bridge_A"
 NODE_ROLE       = "bridge"          # "bridge" | "sensor" | "dashboard"
-CAPABILITIES    = ["LoRa"] #["LoRa", "BLE", "WiFi", "MQTT"]
+CAPABILITIES    = ["LoRa", "Wifi-Direct", "BLE"] 
 
 # WiFi credentials
-WIFI_SSID       = "SINGTEL-93KM"
-WIFI_PASSWORD   = "fddxftv82d"
+WIFI_SSID       = "Gigachad Hotspot"
+WIFI_PASSWORD   = "95610309"
 WIFI_CONNECT_ATTEMPTS = 3          # Retry association attempts before failing startup
 WIFI_CONNECT_TIMEOUT_S = 20         # Per-attempt connect timeout in seconds
 
 # MQTT broker
-MQTT_BROKER     = "192.168.1.9"
+MQTT_BROKER     = "10.196.168.251"
 MQTT_PORT       = 1883
 MQTT_USER       = ""
 MQTT_PASSWORD   = ""
@@ -21,7 +21,7 @@ MQTT_KEEPALIVE  = 60
 # Discovery
 HELLO_INTERVAL  = 15                # seconds between Hello broadcasts
 HELLO_TIMEOUT   = 45                # 3x interval -> declare neighbour dead
-ENABLE_LORA_HELLO = False           # Sender endpoints may not consume hello frames
+ENABLE_LORA_HELLO = True           # Sender endpoints may not consume hello frames
 ENABLE_WIFI_HELLO = True            # Keep MQTT/wifi topology discovery enabled
 
 # Mesh join/auth (LoRa edges)

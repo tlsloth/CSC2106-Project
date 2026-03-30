@@ -13,41 +13,11 @@ from core import packet, mpr
 TAG = "MAIN"
 
 
-def _safe_mode_requested():
-    """Allow skipping app startup by holding BOOTSEL during a short grace window."""
-    if not getattr(config, "ALLOW_BOOTSEL_SAFE_MODE", True):
-        return False
-
-    grace_ms = int(getattr(config, "STARTUP_GRACE_MS", 0) or 0)
-    if grace_ms <= 0:
-        return False
-
-    try:
-        import rp2
-    except Exception:
-        return False
-
-    logger.warn(TAG, "Hold BOOTSEL to enter safe mode ({} ms window)".format(grace_ms))
-    start = time.ticks_ms()
-
-    while time.ticks_diff(time.ticks_ms(), start) < grace_ms:
-        try:
-            if rp2.bootsel_button():
-                logger.warn(TAG, "Safe mode requested via BOOTSEL; app startup skipped")
-                return True
-        except Exception:
-            return False
-        time.sleep_ms(100)
-
-    return False
-
-
 def _load_lora_interface():
     transport = getattr(config, "LORA_TRANSPORT", "SPI").upper()
     if transport == "UART":
         from interfaces import uart_lora_interface
         return transport, uart_lora_interface
-
 
     from interfaces import lora_interface
     return transport, lora_interface
@@ -55,11 +25,6 @@ def _load_lora_interface():
 
 def main():
     logger.set_level(config.LOG_LEVEL)
-
-    if _safe_mode_requested():
-        logger.warn(TAG, "Safe mode active. Staying at REPL for recovery.")
-        return
-
     logger.info(TAG, "=== MPR Bridge starting: {} ===".format(config.NODE_ID))
     logger.info(TAG, "Role: {}, Capabilities: {}".format(config.NODE_ROLE, config.CAPABILITIES))
 
@@ -67,8 +32,11 @@ def main():
     neighbour_table = NeighbourTable()
     routing_table = RoutingTable()
     ingress_queue = PriorityQueue("ingress")
-    wifi_egress = PriorityQueue("wifi_egress")
-    lora_egress = PriorityQueue("lora_egress")
+    
+    # Egress Queues for each protocol
+    wifi_egress = PriorityQueue("wifi_egress")           # For MQTT to Dashboard
+    lora_egress = PriorityQueue("lora_egress")           # For LoRa Mesh
+    wifi_direct_egress = PriorityQueue("wifi_direct")    # For UDP Peer-to-Peer
 
     # --- Software watchdog ---
     def _on_watchdog():
@@ -88,6 +56,8 @@ def main():
     lora_ok = False
     ble_ok = False
     wifi_ok = False
+    wifi_direct_ok = False
+    
     lora_transport = getattr(config, "LORA_TRANSPORT", "SPI").upper()
     lora_module = None
 
@@ -99,15 +69,21 @@ def main():
         from interfaces import wifi_interface
         wifi_ok = wifi_interface.init()
 
+    # INJECTION 1: Initialize WiFi-Direct
+    if "WiFi-Direct" in config.CAPABILITIES:
+        from interfaces import wifi_direct_interface
+        wifi_direct_ok = wifi_direct_interface.init()
+
     if "BLE" in config.CAPABILITIES:
         from interfaces import ble_interface
         ble_ok = ble_interface.init()
 
-    logger.info(TAG, "Interfaces — LoRa({}):{} BLE:{} WiFi:{}".format(
+    logger.info(TAG, "Interfaces — LoRa({}):{} BLE:{} WiFi:{} WiFi-Direct:{}".format(
         lora_transport,
         "OK" if lora_ok else "FAIL",
         "OK" if ble_ok else "FAIL",
         "OK" if wifi_ok else "FAIL",
+        "OK" if wifi_direct_ok else "FAIL"
     ))
 
     # --- Start async event loop ---
@@ -129,9 +105,6 @@ def main():
                     dst = pkt.get("dst", "dashboard")
                     src = pkt.get("src", "unknown")
 
-                    # Only drop transit packets that are explicitly for a different hop.
-                    # Dashboard-bound telemetry is always consumed by this bridge for MQTT publish,
-                    # even if hop_dst is set by a simple endpoint sender.
                     is_dashboard_bound = (dst == "dashboard")
                     if (
                         pkt.get("src") != config.NODE_ID
@@ -139,35 +112,32 @@ def main():
                         and pkt["hop_dst"] != config.NODE_ID
                         and not is_dashboard_bound
                     ):
-                        # Not for us — drop or forward
                         logger.debug(TAG, "Packet not addressed to us, skipping")
                         await asyncio.sleep_ms(10)
                         continue
 
-                    # Decrement TTL for relayed packets
                     if pkt.get("src") != config.NODE_ID:
                         pkt = packet.decrement_ttl(pkt)
                         if pkt is None:
                             continue
 
-                    # Route lookup
                     route = routing_table.lookup(dst)
                     if route:
                         protocol = route["via_protocol"]
                         pkt["hop_src"] = config.NODE_ID
                         pkt["hop_dst"] = route["next_hop"]
                     else:
-                        # Default: forward to WiFi/MQTT (dashboard)
                         protocol = "WiFi"
 
-                    # Push to appropriate egress queue
+                    # INJECTION 2: Route packets to the new UDP queue
                     priority = pkt.get("priority", packet.PRIORITY_NORMAL)
                     if protocol in ("WiFi", "MQTT"):
                         wifi_egress.push(priority, pkt)
+                    elif protocol == "WiFi-Direct":
+                        wifi_direct_egress.push(priority, pkt)
                     elif protocol == "LoRa":
                         lora_egress.push(priority, pkt)
                     elif protocol == "BLE":
-                        # BLE write-back is not yet supported; forward via WiFi
                         wifi_egress.push(priority, pkt)
                     else:
                         wifi_egress.push(priority, pkt)
@@ -184,16 +154,13 @@ def main():
         logger.info(TAG, "Route maintenance task started")
         while True:
             try:
-                # Prune dead neighbours
                 dead = neighbour_table.prune_dead()
                 if dead:
                     logger.warn(TAG, "Dead neighbours pruned: {}".format(dead))
 
-                # Recompute routing table
                 if len(neighbour_table) > 0:
                     routing_table.compute(neighbour_table)
 
-                    # Check MPR status
                     if mpr.is_mpr(config.NODE_ID, neighbour_table):
                         logger.debug(TAG, "This node is an active MPR")
 
@@ -213,15 +180,14 @@ def main():
         """Launch all concurrent tasks."""
         tasks = []
 
-        # Core tasks (always run)
+        # Core tasks
         tasks.append(asyncio.create_task(translator_task()))
         tasks.append(asyncio.create_task(route_maintenance_task()))
         tasks.append(asyncio.create_task(watchdog_task()))
 
-        # Interface-specific tasks
+        # LoRa Tasks
         should_run_lora_tasks = bool(lora_ok)
         if (not should_run_lora_tasks) and lora_module is not None and lora_transport in ("UART", "I2C"):
-            # UART/I2C bridge interfaces can recover from transient init failures at runtime.
             should_run_lora_tasks = True
 
         if should_run_lora_tasks:
@@ -238,11 +204,13 @@ def main():
                 tasks.append(asyncio.create_task(
                     lora_module.hello_task(neighbour_table)))
 
+        # BLE Tasks
         if ble_ok:
             from interfaces import ble_interface
             tasks.append(asyncio.create_task(
                 ble_interface.rx_task(ingress_queue, neighbour_table)))
 
+        # MQTT / WiFi Tasks
         if wifi_ok:
             from interfaces import wifi_interface
             tasks.append(asyncio.create_task(
@@ -252,6 +220,16 @@ def main():
             if getattr(config, "ENABLE_WIFI_HELLO", True):
                 tasks.append(asyncio.create_task(
                     wifi_interface.hello_task(neighbour_table)))
+
+        # INJECTION 3: Launch WiFi-Direct Tasks
+        if wifi_direct_ok:
+            from interfaces import wifi_direct_interface
+            tasks.append(asyncio.create_task(
+                wifi_direct_interface.tx_task(wifi_direct_egress)))
+            tasks.append(asyncio.create_task(
+                wifi_direct_interface.rx_task(ingress_queue, neighbour_table)))
+            tasks.append(asyncio.create_task(
+                wifi_direct_interface.hello_task(neighbour_table)))
 
         logger.info(TAG, "All tasks launched ({} total)".format(len(tasks)))
 
@@ -274,7 +252,6 @@ def main():
                 pass
         else:
             logger.warn(TAG, "Auto-reset on fatal is disabled; staying at REPL")
-
 
 # Auto-run on boot
 main()

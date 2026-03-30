@@ -8,13 +8,14 @@ TAG = "RTR"
 # Cost lookup for protocol translation pairs
 _COST_MAP = {
     ("LoRa", "LoRa"):  config.COST_NATIVE,
-    ("WiFi", "WiFi"):  config.COST_NATIVE,
+    ("WiFi-Direct", "WiFi-Direct"):  config.COST_NATIVE,
     ("BLE", "BLE"):    config.COST_NATIVE,
     ("MQTT", "MQTT"):  config.COST_NATIVE,
-    ("LoRa", "WiFi"):  config.COST_LORA_WIFI,
-    ("WiFi", "LoRa"):  config.COST_LORA_WIFI,
-    ("BLE", "WiFi"):   config.COST_BLE_WIFI,
-    ("WiFi", "BLE"):   config.COST_BLE_WIFI,
+    ("WiFi-Direct", "MQTT"): 5,
+    ("LoRa", "WiFi-Direct"):  config.COST_LORA_WIFI,
+    ("WiFi-Direct", "LoRa"):  config.COST_LORA_WIFI,
+    ("BLE", "WiFi-Direct"):   config.COST_BLE_WIFI,
+    ("WiFi-Direct", "BLE"):   config.COST_BLE_WIFI,
     ("LoRa", "BLE"):   config.COST_LORA_BLE,
     ("BLE", "LoRa"):   config.COST_LORA_BLE,
 }

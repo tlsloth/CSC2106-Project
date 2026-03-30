@@ -26,12 +26,25 @@ def get_translation_cost(proto_a, proto_b):
         return config.COST_NATIVE
     return _COST_MAP.get((proto_a, proto_b), 10)  # default high cost for unknown pairs
 
+def _calculate_rssi_penalty(rssi):
+    """Calculates penalty based on signal strength"""
+    if rssi == 0:
+        return 2
+    if rssi >= -65:
+        return 0
+    elif rssi >= -85:
+        return 1
+    elif rssi >= -100:
+        return 3
+    else:
+        return 6
+
 
 def build_graph(neighbour_table, self_id=None):
     """Build a weighted graph from the neighbour table for Dijkstra.
 
     The graph is: { node_id: { neighbour_id: cost, ... }, ... }
-    Cost is the minimum translation cost between the two nodes' shared protocols.
+    Cost is the minimum translation cost between the two nodes' shared protocols + rssi calculation.
     """
     if self_id is None:
         self_id = config.NODE_ID
@@ -49,6 +62,9 @@ def build_graph(neighbour_table, self_id=None):
             continue
         nbr_protos = entry.get("protocols", [])
         # Find minimum cost across protocol pairs
+        rssi = entry.get("rssi",0)
+        rssi_penalty = _calculate_rssi_penalty(rssi)
+        
         min_cost = float("inf")
         for sp in self_protos:
             for np in nbr_protos:
@@ -56,8 +72,9 @@ def build_graph(neighbour_table, self_id=None):
                 if c < min_cost:
                     min_cost = c
         if min_cost < float("inf"):
-            graph[self_id][nid] = min_cost
-            graph[nid][self_id] = min_cost
+            final_cost = min_cost + rssi_penalty
+            graph[self_id][nid] = final_cost
+            graph[nid][self_id] = final_cost
 
     # Edges between remote neighbours (from merged topology)
     for nid, entry in all_entries.items():
@@ -65,6 +82,8 @@ def build_graph(neighbour_table, self_id=None):
         if via and via in graph:
             nbr_protos = entry.get("protocols", [])
             via_protos = all_entries.get(via, {}).get("protocols", [])
+            rssi = entry.get("rssi", 0)
+            rssi_penalty = _calculate_rssi_penalty(rssi)
             min_cost = float("inf")
             for vp in via_protos:
                 for np in nbr_protos:
@@ -72,8 +91,9 @@ def build_graph(neighbour_table, self_id=None):
                     if c < min_cost:
                         min_cost = c
             if min_cost < float("inf"):
-                graph.setdefault(via, {})[nid] = min_cost
-                graph.setdefault(nid, {})[via] = min_cost
+                final_cost = min_cost + rssi_penalty
+                graph.setdefault(via, {})[nid] = final_cost
+                graph.setdefault(nid, {})[via] = final_cost
 
     return graph
 

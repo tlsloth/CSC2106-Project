@@ -202,7 +202,7 @@ def main():
                 lora_module.tx_task(lora_egress)))
             if getattr(config, "ENABLE_LORA_HELLO", False):
                 tasks.append(asyncio.create_task(
-                    lora_module.hello_task(neighbour_table)))
+                    lora_module.hello_task(neighbour_table,lora_egress)))
 
         # BLE Tasks
         if ble_ok:

@@ -142,6 +142,7 @@ async def rx_task(ingress_queue, neighbour_table):
                     if msg_src == config.NODE_ID:
                         continue 
 
+
                     if msg_type == "hello":
                         neighbour_table.update(
                             msg_src,
@@ -150,6 +151,16 @@ async def rx_task(ingress_queue, neighbour_table):
                         )
                         continue
 
+
+                    if msg_type == "topology":
+                        remote_id = msg_obj.get("node_id")
+                        remote_neighbours = msg_obj.get("neighbours", {})
+                        if remote_id and remote_id != config.NODE_ID:
+                            neighbour_table.merge_remote(remote_id, remote_neighbours)
+                            logger.debug(TAG, f"Merged topology from {remote_id} via WiFi-Direct")
+                        continue
+
+                    # Normal data packet routing
                     ingress_queue.push(msg_obj.get("priority", packet.PRIORITY_NORMAL), msg_obj)
 
         except Exception as e:
@@ -158,7 +169,7 @@ async def rx_task(ingress_queue, neighbour_table):
         await asyncio.sleep_ms(200)
 
 async def hello_task(neighbour_table):
-    """Async task: periodically broadcast our presence to the local network."""
+    """Async task: periodically broadcast presence and topology."""
     import uasyncio as asyncio
     logger.info(TAG, "WiFi-Direct Hello task started")
     
@@ -166,18 +177,27 @@ async def hello_task(neighbour_table):
         try:
             if is_available():
                 hello = create_hello_payload()
-                
                 if "WiFi-Direct" not in hello["capabilities"]:
                     hello["capabilities"].append("WiFi-Direct")
 
                 payload_str = json.dumps(hello)
-                
                 async with _udp_lock:
                     try:
                         _sock_tx.sendto(payload_str.encode('utf-8'), (BROADCAST_IP, UDP_PORT))
-                        logger.debug(TAG, "Broadcasted WiFi-Direct Hello") 
                     except Exception as e:
                         logger.error(TAG, f"Hello broadcast failed: {e}")
+
+                topo_payload = {
+                    "type": "topology",
+                    "node_id": config.NODE_ID,
+                    "neighbours": neighbour_table.to_dict()
+                }
+                async with _udp_lock:
+                    try:
+                        _sock_tx.sendto(json.dumps(topo_payload).encode('utf-8'), (BROADCAST_IP, UDP_PORT))
+                        logger.debug(TAG, "Broadcasted WiFi-Direct Topology")
+                    except Exception as e:
+                        logger.error(TAG, f"Topology broadcast failed: {e}")
                         
         except Exception as e:
             logger.error(TAG, f"Hello task error: {e}")

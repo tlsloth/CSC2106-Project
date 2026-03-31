@@ -133,11 +133,10 @@ def _extract_dashboard_fields(data):
     node = data.get("node_id", "unknown")
     payload = data.get("payload", {})
     last_hop = data.get("hop_dst", "unknown_bridge") # Shows which bridge handed it to MQTT
-
     # Extract sensor values
     temp = payload.get("temp", payload.get("T"))
     hum = payload.get("hum", payload.get("H"))
-    rssi = payload.get("rssi")
+    rssi = data.get("rssi")
 
     return node, temp, hum, rssi, last_hop
 

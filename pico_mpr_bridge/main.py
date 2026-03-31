@@ -94,14 +94,42 @@ def main():
         from core.translator import translate_to_mqtt
         logger.info(TAG, "Translator task started")
 
+        pending_routes = {}
+        last_query_time = {}
+
         while True:
             try:
                 if not ingress_queue.is_empty():
                     pkt = ingress_queue.pop()
+                    
                     if pkt is None:
                         await asyncio.sleep_ms(50)
                         continue
 
+                    if pkt.get("type") == "route_resp":
+                        target_dst = pkt.get("dst") # The destination we originally asked about
+                        status = pkt.get("status")
+                        
+                        # Only process it if we were the bridge that asked, and a route was found!
+                        if pkt.get("req_src") == config.NODE_ID and status == "ok":
+                            next_hop = pkt.get("next_hop")
+                            via_proto = pkt.get("via_protocol")
+                            cost = pkt.get("cost", 10)
+                            
+                            if target_dst and next_hop:
+                                # 1. Memorize the route in our new cache!
+                                routing_table.cache_route(target_dst, next_hop, via_proto, cost)
+                                
+                                # 2. Flush the Holding Pen!
+                                if target_dst in pending_routes:
+                                    logger.info(TAG, f"Flushing {len(pending_routes[target_dst])} held packets for {target_dst}!")
+                                    for held_pkt in pending_routes[target_dst]:
+                                        # Push back into ingress with high priority so it routes instantly
+                                        ingress_queue.push(10, held_pkt) 
+                                    del pending_routes[target_dst]
+                        
+                        # Consume the response packet so it doesn't get routed further
+                        continue
                     dst = pkt.get("dst")
                     src = pkt.get("src", "unknown")
                     hop_dst = pkt.get("hop_dst")
@@ -128,6 +156,31 @@ def main():
                         pkt["hop_src"] = config.NODE_ID
                         pkt["hop_dst"] = route["next_hop"]
                     else:
+                        # query route if we dont have it, this should only be done if we dont have wifi direct and lora / ble available
+                        logger.info(TAG, f"No route to {dst}, Holding packets for query.")
+                        if dst not in pending_routes:
+                            pending_routes[dst] = []
+                            pending_routes[dst].append(pkt)
+
+                        now = time.time()
+                        if dst not in last_query_time or (now - last_query_time[dst] > 5):
+                            # create query pkt
+                            query_pkt = {
+                                "type": "route_query",
+                                "kind": "control",
+                                "src": config.NODE_ID,
+                                "dst": dst
+                            }
+
+                            # check if we support lora or ble
+                            if "LoRa" in config.CAPABILITIES:
+                                # push with priority
+                                lora_egress.push(1, query_pkt)
+                                logger.debug(TAG, f"Broadcasted route_query for {dst} over LoRa")
+
+                            #ble check
+
+                            last_query_time[dst] = now
                         continue
 
                     # INJECTION 2: Route packets to the new UDP queue

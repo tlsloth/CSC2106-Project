@@ -349,7 +349,7 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                 
                                 if msg_type == "hello":
                                     _send_hello_ack(msg,egress_queue)
-                                if msg_type in ("hello", "hello_ack", "join_ack", "route_resp"):
+                                if msg_type in ("hello", "hello_ack", "join_ack"):
                                     continue
 
                                 pkt = translate_lora_payload(

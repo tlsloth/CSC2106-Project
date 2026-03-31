@@ -2,6 +2,7 @@
 
 import config
 from utils import logger
+import time
 
 TAG = "RTR"
 
@@ -148,6 +149,7 @@ class RoutingTable:
     def __init__(self):
         # { dest_id: {"next_hop": str, "via_protocol": str, "cost": float} }
         self._table = {}
+        self._cache = {}
 
     def compute(self, neighbour_table):
         """Recompute the routing table from the current neighbour table."""
@@ -185,9 +187,33 @@ class RoutingTable:
             logger.debug(TAG, "  {} -> next={} via={} cost={}".format(
                 dest, entry["next_hop"], entry["via_protocol"], entry["cost"]))
 
+    def cache_route(self, destination, next_hop, via_protocol, cost, ttl_seconds=300):
+        """Temporarily cache a route discovered via a route_query/route_resp."""
+        self._cache[destination] = {
+            "next_hop": next_hop,
+            "via_protocol": via_protocol,
+            "cost": cost,
+            "expires_at": time.time() + ttl_seconds
+        }
+        logger.info(TAG, f"Cached reactive route: {destination} via {next_hop} ({via_protocol}) for {ttl_seconds}s")
+
     def lookup(self, destination):
-        """Look up routing info for a destination. Returns dict or None."""
-        return self._table.get(destination)
+        """Look up routing info. Checks proactive table first, then reactive cache."""
+        # 1. Check the Proactive Table (Dijkstra)
+        if destination in self._table:
+            return self._table[destination]
+            
+        # 2. Check the Reactive Cache (AODV)
+        if destination in self._cache:
+            entry = self._cache[destination]
+            if time.time() < entry["expires_at"]:
+                return entry
+            else:
+                # Route has expired, prune it
+                logger.debug(TAG, f"Cached route to {destination} expired.")
+                del self._cache[destination]
+                
+        return None
 
     def get_all(self):
         return dict(self._table)

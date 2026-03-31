@@ -7,11 +7,11 @@ from flask import Flask, jsonify
 import paho.mqtt.client as mqtt
 
 # Dashboard MQTT settings
-MQTT_BROKER = "192.168.0.87" # Ensure this matches your laptop's IP
+MQTT_BROKER = "192.168.137.1" # Ensure this matches your laptop's IP
 MQTT_PORT = 1883
 MQTT_USER = ""
 MQTT_PASSWORD = ""
-MQTT_TOPIC_DATA = "mesh/+"
+MQTT_TOPIC_DATA = "mesh/#"
 NODE_ID = "dashboard_main"
 HELLO_INTERVAL = 15
 
@@ -130,13 +130,13 @@ HTML_PAGE = """
 def _extract_dashboard_fields(data):
     """Extracts data from the standard Mesh routing envelope."""
     # Our translated packet shape
-    node = data.get("src", "unknown")
-    payload = data.get("data", {})
+    node = data.get("node_id", "unknown")
+    payload = data.get("payload", {})
     last_hop = data.get("hop_dst", "unknown_bridge") # Shows which bridge handed it to MQTT
 
     # Extract sensor values
     temp = payload.get("temp", payload.get("T"))
-    hum = payload.get("humidity", payload.get("H"))
+    hum = payload.get("hum", payload.get("H"))
     rssi = payload.get("rssi")
 
     return node, temp, hum, rssi, last_hop
@@ -218,4 +218,4 @@ def start_mqtt():
 if __name__ == "__main__":
     mqtt_client = start_mqtt()
     print(f"Starting dashboard on http://{WEB_HOST}:{WEB_PORT}")
-    app.run(host=WEB_HOST, port=WEB_PORT, debug=False)
+    app.run(host=WEB_HOST, port=WEB_PORT, debug=True, use_reloader=False)

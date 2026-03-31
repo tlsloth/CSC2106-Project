@@ -135,6 +135,7 @@ bool BridgeMesh::sendJoinRequest()
   {
     return false;
   }
+  Serial.print("TX| ");
   Serial.println(payload);
 
   bool ok = sendRaw(payload);
@@ -224,6 +225,8 @@ bool BridgeMesh::sendJsonObject(const char *jsonObject, const char *type)
   {
     return false;
   }
+  Serial.print("TX| ");
+  Serial.println(packet);
 
   return sendRaw(packet);
 }
@@ -309,7 +312,7 @@ void BridgeMesh::handleControlMessage(const char *incoming)
 {
   if (!incoming || !incoming[0])
     return;
-
+  Serial.print("RX| ");
   Serial.println(incoming);
 
   if (!contains(incoming, "\"type\":\"join_ack\"") &&

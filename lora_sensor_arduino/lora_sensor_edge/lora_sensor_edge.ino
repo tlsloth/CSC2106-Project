@@ -61,12 +61,6 @@ bool sendTelemetry()
   }
 
   bool success = mesh.sendJsonObject(json, type);
-  if (success)
-  {
-    Serial.print("TX Telemetry: ");
-    Serial.println(json);
-  }
-
   return success;
 }
 

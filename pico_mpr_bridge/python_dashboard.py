@@ -141,7 +141,7 @@ def _extract_dashboard_fields(data):
 
     return node, temp, hum, rssi, last_hop
 
-def on_connect(client, userdata, flags, rc):
+def on_connect(client, userdata, flags, rc, properties=None):
     global _mqtt_connected
     if rc == 0:
         _mqtt_connected = True

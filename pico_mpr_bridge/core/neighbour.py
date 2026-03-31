@@ -97,7 +97,7 @@ class NeighbourTable:
             else:
                 if self._table[nid].get("via") == remote_node_id:
                     self._table[nid]["last_seen"] = now
-                    self._[nid]["capabilities"] = entry.get("capabilities",[])
+                    self._table[nid]["capabilities"] = entry.get("capabilities",[])
 
     def __len__(self):
         return len(self._table)

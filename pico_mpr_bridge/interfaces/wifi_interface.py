@@ -146,7 +146,7 @@ async def tx_task(egress_queue):
                     msg_type = pkt.get("type", "")
                     
                     if msg_type in ["data", "sensor", "sensor_data"]:
-                        node_id = pkt.get("src", "unknown") or pkt.get("node_id") or "unknown"
+                        node_id = pkt.get("node_id") or pkt.get("src") or "unknown"
                         topic = f"mesh/data/{node_id}" # Matches your Flask app subscription
                         
                         # Inject this bridge's ID so the dashboard knows who routed it!

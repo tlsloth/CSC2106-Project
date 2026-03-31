@@ -79,6 +79,8 @@ class NeighbourTable:
     def merge_remote(self, remote_node_id, remote_table):
         """Merge topology info received from another bridge.
         This extends our view to 2-hop neighbours."""
+        now = time.time()
+
         for nid, entry in remote_table.items():
             if nid == config.NODE_ID:
                 continue
@@ -91,6 +93,11 @@ class NeighbourTable:
                     "capabilities": entry.get("capabilities", []),
                     "via": remote_node_id,  # indicates 2-hop
                 }
+            
+            else:
+                if self._table[nid].get("via") == remote_node_id:
+                    self._table[nid]["last_seen"] = now
+                    self._[nid]["capabilities"] = entry.get("capabilities",[])
 
     def __len__(self):
         return len(self._table)

@@ -352,16 +352,16 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                 if msg_type in ("hello", "hello_ack", "join_ack"):
                                     continue
 
-                                pkt = translate_lora_payload(
-                                    payload,
-                                    source_id=msg_node_id,
-                                )
-                                if pkt:
-                                    pkt["rssi"] = parsed.get("rssi", 0)
+                                if isinstance(msg, dict):
+                                    msg["rssi"] = parsed.get("rssi",0)
                                     ingress_queue.push(
-                                        pkt.get("priority", DEFAULT_PRIORITY),
-                                        pkt,
+                                        msg.get("priority", DEFAULT_PRIORITY),
+                                        msg
                                     )
+                                    logger.debug(TAG, f"Pushed {msg_type} to ingress queue")
+                                else:
+                                    logger.warn(TAG, f"Dropped unformatted message: {msg} ")
+
                         else:
                             logger.debug(TAG, "Unrecognized bridge line: {}".format(parsed["line"]))
 

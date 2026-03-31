@@ -101,7 +101,7 @@ def main():
             try:
                 if not ingress_queue.is_empty():
                     pkt = ingress_queue.pop()
-                    
+
                     if pkt is None:
                         await asyncio.sleep_ms(50)
                         continue
@@ -131,7 +131,7 @@ def main():
                         # Consume the response packet so it doesn't get routed further
                         continue
                     dst = pkt.get("dst")
-                    src = pkt.get("src", "unknown")
+                    src = pkt.get("src") or pkt.get("node_id") or "unknown"
                     hop_dst = pkt.get("hop_dst")
 
                     if not dst:

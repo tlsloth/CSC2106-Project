@@ -145,8 +145,8 @@ async def tx_task(egress_queue):
                 if pkt:
                     msg_type = pkt.get("type", "")
                     
-                    if msg_type in ["data", "sensor"]:
-                        node_id = pkt.get("src", "unknown")
+                    if msg_type in ["data", "sensor", "sensor_data"]:
+                        node_id = pkt.get("src", "unknown") or pkt.get("node_id") or "unknown"
                         topic = f"mesh/data/{node_id}" # Matches your Flask app subscription
                         
                         # Inject this bridge's ID so the dashboard knows who routed it!
@@ -154,6 +154,7 @@ async def tx_task(egress_queue):
                         
                         payload_str = json.dumps(pkt)
                         mqtt_publish(topic, payload_str)
+                        logger.debug(TAG, f"Published telemetry to {topic}")
                     
                     # You can still use translator for other packet types if needed here
                     # result = translate_to_mqtt(pkt) ...

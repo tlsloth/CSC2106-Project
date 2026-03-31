@@ -3,11 +3,11 @@
 # Node identity
 NODE_ID         = "bridge_A"
 NODE_ROLE       = "bridge"          # "bridge" | "sensor" | "dashboard"
-CAPABILITIES    = ["LoRa", "Wifi-Direct", "BLE"] 
+CAPABILITIES    = ["LoRa", "WiFi-Direct"] 
 
 # WiFi credentials
-WIFI_SSID       = "Gigachad Hotspot"
-WIFI_PASSWORD   = "95610309"
+WIFI_SSID       = "Gigachad Laptop"
+WIFI_PASSWORD   = "12345678"
 WIFI_CONNECT_ATTEMPTS = 3          # Retry association attempts before failing startup
 WIFI_CONNECT_TIMEOUT_S = 20         # Per-attempt connect timeout in seconds
 
@@ -21,7 +21,7 @@ MQTT_KEEPALIVE  = 60
 # Discovery
 HELLO_INTERVAL  = 15                # seconds between Hello broadcasts
 HELLO_TIMEOUT   = 45                # 3x interval -> declare neighbour dead
-ENABLE_LORA_HELLO = True           # Sender endpoints may not consume hello frames
+ENABLE_LORA_HELLO = False           # Sender endpoints may not consume hello frames
 ENABLE_WIFI_HELLO = True            # Keep MQTT/wifi topology discovery enabled
 
 # Mesh join/auth (LoRa edges)

@@ -216,9 +216,20 @@ async def hello_task(neighbour_table):
     while True:
         try:
             if is_available():
+                # 1. Publish the standard Hello
                 hello = create_hello_payload()
-                topic = getattr(config, "MQTT_HELLO_TOPIC", "mesh/hello")
-                mqtt_publish(topic, json.dumps(hello))
-        except Exception:
-            pass
-        await asyncio.sleep(getattr(config, "HELLO_INTERVAL", 30))
+                hello_topic = getattr(config, "MQTT_HELLO_TOPIC", "mesh/hello")
+                mqtt_publish(hello_topic, json.dumps(hello))
+                
+                # 2. Publish the Topology
+                topo_topic = getattr(config, "MQTT_TOPO_TOPIC", "mesh/topology/{node_id}").format(node_id=config.NODE_ID)
+                topo_data = json.dumps({
+                    "node_id": config.NODE_ID,
+                    "neighbours": neighbour_table.to_dict(),
+                })
+                mqtt_publish(topo_topic, topo_data)
+                
+        except Exception as e:
+            logger.error(TAG, f"Hello/Topo publish error: {e}")
+            
+        await asyncio.sleep(getattr(config, "HELLO_INTERVAL", 15))

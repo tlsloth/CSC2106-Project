@@ -200,7 +200,7 @@ def _determine_protocol(next_hop, all_entries):
     """Determine the best protocol to reach the next hop."""
     entry = all_entries.get(next_hop)
     if not entry:
-        return "WiFi"  # fallback
+        return "WiFi-Direct"  # fallback
 
     protocols = entry.get("protocols", [])
     my_protos = config.CAPABILITIES

@@ -1,16 +1,19 @@
 import json
 import threading
 from datetime import datetime
+import time
 
 from flask import Flask, jsonify
 import paho.mqtt.client as mqtt
 
 # Dashboard MQTT settings
-MQTT_BROKER = "10.196.168.251" # Ensure this matches your laptop's IP
+MQTT_BROKER = "192.168.0.87" # Ensure this matches your laptop's IP
 MQTT_PORT = 1883
 MQTT_USER = ""
 MQTT_PASSWORD = ""
-MQTT_TOPIC_DATA = "mesh/data/+"
+MQTT_TOPIC_DATA = "mesh/+"
+NODE_ID = "dashboard_main"
+HELLO_INTERVAL = 15
 
 # Web dashboard settings
 WEB_HOST = "0.0.0.0"
@@ -151,6 +154,8 @@ def on_message(client, userdata, msg):
     try:
         payload_text = msg.payload.decode("utf-8")
         data = json.loads(payload_text)
+        logging_info = f"MQTT RX on {msg.topic}: {payload_text}";
+        print(logging_info)
     except Exception:
         return # Ignore garbage data
 
@@ -179,12 +184,35 @@ def index(): return HTML_PAGE
 def api_nodes():
     with _state_lock: return jsonify(dict(_state_by_node))
 
+def dashboard_hello_loop(client):
+    while True:
+        if _mqtt_connected:
+            hello_payload = {
+                "type": "hello",
+                "node_id": NODE_ID,
+                "protocols":["MQTT"],
+                "capabilities":["MQTT"]
+            }
+            try:
+                # send packet
+                client.publish("mesh/hello", json.dumps(hello_payload))
+                print(f"Broadcasted Hello from {NODE_ID}")
+            except Exception as e:
+                print(f"Failed to send hello: {e}")
+        time.sleep(15)
+
 def start_mqtt():
-    client = mqtt.Client(client_id="python_dashboard")
+    try:
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=NODE_ID)
+    except AttributeError:
+        client = mqtt.Client(client_id=NODE_ID)
     client.on_connect = on_connect
     client.on_message = on_message
     client.connect_async(MQTT_BROKER, MQTT_PORT, 60)
     client.loop_start()
+
+    hello_thread = threading.Thread(target=dashboard_hello_loop, args=(client,),daemon=True)
+    hello_thread.start()
     return client
 
 if __name__ == "__main__":

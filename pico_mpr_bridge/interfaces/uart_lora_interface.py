@@ -352,15 +352,18 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                 if msg_type in ("hello", "hello_ack", "join_ack"):
                                     continue
 
-                                if isinstance(msg, dict):
-                                    msg["rssi"] = parsed.get("rssi",0)
-                                    ingress_queue.push(
-                                        msg.get("priority", DEFAULT_PRIORITY),
-                                        msg
-                                    )
-                                    logger.debug(TAG, f"Pushed {msg_type} to ingress queue")
-                                else:
-                                    logger.warn(TAG, f"Dropped unformatted message: {msg} ")
+                            if isinstance(msg, dict):
+                                msg["rssi"] = parsed.get("rssi",0)
+                                if "ttl" not in msg:
+                                    msg["ttl"] = getattr(config, "PACKET_TTL", 5)
+                                
+                                ingress_queue.push(
+                                    msg.get("priority", DEFAULT_PRIORITY),
+                                    msg
+                                )
+                                logger.debug(TAG, f"Pushed {msg_type} to ingress queue")
+                            else:
+                                logger.warn(TAG, f"Dropped unformatted message: {msg} ")
 
                         else:
                             logger.debug(TAG, "Unrecognized bridge line: {}".format(parsed["line"]))

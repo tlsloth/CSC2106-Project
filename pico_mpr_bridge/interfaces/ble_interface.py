@@ -204,8 +204,6 @@ async def rx_task(ingress_queue, neighbour_table):
                                 logger.debug(TAG, "Enqueued BLE distance from {}".format(node_id))
                             else:
                                 logger.warn(TAG, "create_packet returned invalid packet")
-                            else:
-                                logger.warn(TAG, "BLE read returned empty or invalid data")
                         finally:
                             await connection.disconnect()
                             logger.debug(TAG, "Disconnected from {}".format(device_name))

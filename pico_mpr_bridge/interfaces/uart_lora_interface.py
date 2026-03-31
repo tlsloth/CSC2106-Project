@@ -308,30 +308,30 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                 _send_join_ack(msg, ok, egress_queue, reason, token)
                                 continue
 
+
+                            token_ok, token_reason = check_node_token(
+                                msg,
+                                _node_tokens.get(msg_node_id),
+                                getattr(config, "MESH_JOIN_KEY", ""),
+                            )
+                            if not token_ok:
+                                logger.warn(
+                                    TAG,
+                                    "Dropped {} from {} ({})".format(
+                                        msg_type,
+                                        msg_node_id,
+                                        token_reason,
+                                    ),
+                                )
+                                continue
+
+                            neighbour_table.update(
+                                msg_node_id,
+                                protocols=["LoRa"],
+                                rssi=parsed.get("rssi", 0),
+                                capabilities=msg.get("capabilities", ["LoRa"]),
+                            )
                             if msg_kind == "control":
-                                token_ok, token_reason = check_node_token(
-                                    msg,
-                                    _node_tokens.get(msg_node_id),
-                                    getattr(config, "MESH_JOIN_KEY", ""),
-                                )
-                                if not token_ok:
-                                    logger.warn(
-                                        TAG,
-                                        "Dropped {} from {} ({})".format(
-                                            msg_type,
-                                            msg_node_id,
-                                            token_reason,
-                                        ),
-                                    )
-                                    continue
-
-                                neighbour_table.update(
-                                    msg_node_id,
-                                    protocols=["LoRa"],
-                                    rssi=parsed.get("rssi", 0),
-                                    capabilities=msg.get("capabilities", ["LoRa"]),
-                                )
-
                                 if msg_type == "route_query":
                                     route = None
                                     dst = msg.get("dst")
@@ -352,16 +352,16 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                 if msg_type in ("hello", "hello_ack", "join_ack", "route_resp"):
                                     continue
 
-                            pkt = translate_lora_payload(
-                                payload,
-                                source_id=msg_node_id,
-                            )
-                            if pkt:
-                                pkt["rssi"] = parsed.get("rssi", 0)
-                                ingress_queue.push(
-                                    pkt.get("priority", DEFAULT_PRIORITY),
-                                    pkt,
+                                pkt = translate_lora_payload(
+                                    payload,
+                                    source_id=msg_node_id,
                                 )
+                                if pkt:
+                                    pkt["rssi"] = parsed.get("rssi", 0)
+                                    ingress_queue.push(
+                                        pkt.get("priority", DEFAULT_PRIORITY),
+                                        pkt,
+                                    )
                         else:
                             logger.debug(TAG, "Unrecognized bridge line: {}".format(parsed["line"]))
 

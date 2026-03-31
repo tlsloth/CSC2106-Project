@@ -9,12 +9,11 @@ struct BridgeMeshConfig
   const char *nodeId;
   const char *networkName;
   const char *joinKey;
-  const char *routeDst;
+  const char *targetDst; // Where telemetry should be sent natively
 
   unsigned long joinInterval;
   unsigned long helloInterval;
-  unsigned long routeQueryInterval;
-  unsigned long routeQueryTimeout;
+  unsigned long helloAckTimeout;
 };
 
 class BridgeMesh
@@ -28,7 +27,6 @@ public:
 
   bool sendJoinRequest();
   bool sendHello();
-  bool sendRouteQuery(const char *dst);
   bool sendJsonObject(const char *jsonObject, const char *type);
 
   bool isJoined() const;
@@ -44,14 +42,13 @@ private:
   char _bridgeId[20];
 
   bool _joined;
-  bool _awaitingRouteResponse;
+  bool _awaitingHelloAck;
   uint8_t _missedHelloAcks;
   uint8_t _seq;
 
   unsigned long _lastJoinTime;
   unsigned long _lastHelloTime;
-  unsigned long _lastRouteQueryTime;
-  unsigned long _routeQueryDeadline;
+  unsigned long _helloAckDeadline;
   unsigned long _txHoldUntil;
 
   bool sendRaw(const char *payload);

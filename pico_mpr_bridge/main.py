@@ -102,18 +102,19 @@ def main():
                         await asyncio.sleep_ms(50)
                         continue
 
-                    dst = pkt.get("dst", "dashboard")
+                    dst = pkt.get("dst")
                     src = pkt.get("src", "unknown")
+                    hop_dst = pkt.get("hop_dst")
 
-                    is_dashboard_bound = (dst == "dashboard")
+                    if not dst:
+                        logger.warn(f"Packet from {src} has no destination, dropping packet.")
+                        continue
                     if (
-                        pkt.get("src") != config.NODE_ID
-                        and pkt.get("hop_dst")
-                        and pkt["hop_dst"] != config.NODE_ID
-                        and not is_dashboard_bound
-                    ):
-                        logger.debug(TAG, "Packet not addressed to us, skipping")
-                        await asyncio.sleep_ms(10)
+                        src != config.NODE_ID
+                        and hop_dst
+                        and hop_dst != config.NODE_ID
+                        ):
+                        logger.debug(TAG, "Packet not addressed to us, dropping.")
                         continue
 
                     if pkt.get("src") != config.NODE_ID:
@@ -127,7 +128,7 @@ def main():
                         pkt["hop_src"] = config.NODE_ID
                         pkt["hop_dst"] = route["next_hop"]
                     else:
-                        protocol = "WiFi"
+                        continue
 
                     # INJECTION 2: Route packets to the new UDP queue
                     priority = pkt.get("priority", packet.PRIORITY_NORMAL)

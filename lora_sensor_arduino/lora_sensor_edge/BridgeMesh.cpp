@@ -10,13 +10,12 @@ BridgeMesh::BridgeMesh(RH_RF95 &radio, const BridgeMeshConfig &config)
     : _radio(radio),
       _config(config),
       _joined(false),
-      _awaitingRouteResponse(false),
+      _awaitingHelloAck(false),
       _missedHelloAcks(0),
       _seq(0),
       _lastJoinTime(0),
       _lastHelloTime(0),
-      _lastRouteQueryTime(0),
-      _routeQueryDeadline(0),
+      _helloAckDeadline(0),
       _txHoldUntil(0)
 {
   _token[0] = '\0';
@@ -27,13 +26,12 @@ BridgeMesh::BridgeMesh(RH_RF95 &radio, const BridgeMeshConfig &config)
 bool BridgeMesh::begin()
 {
   _joined = false;
-  _awaitingRouteResponse = false;
+  _awaitingHelloAck = false;
   _missedHelloAcks = 0;
   _seq = 0;
   _lastJoinTime = 0;
   _lastHelloTime = 0;
-  _lastRouteQueryTime = 0;
-  _routeQueryDeadline = 0;
+  _helloAckDeadline = 0;
   _txHoldUntil = 0;
   _token[0] = '\0';
   randomSeed(micros());
@@ -82,8 +80,6 @@ uint32_t BridgeMesh::fnv1a32(const char *str)
   return hash;
 }
 
-// XOR-decrypt a hex-encoded, XOR-encrypted token using join key.
-// This is exactly your previous decryptToken logic.
 bool BridgeMesh::decryptToken(const char *encoded, const char *key, char *out, size_t outSize)
 {
   size_t hexLen = strlen(encoded);
@@ -126,16 +122,14 @@ bool BridgeMesh::sendJoinRequest()
   char authHex[9];
   snprintf(authHex, sizeof(authHex), "%08lx", (unsigned long)fnv1a32(_config.joinKey));
 
-  int written;
-
-    written = snprintf(
-        payload,
-        sizeof(payload),
-        "{\"type\":\"join_req\",\"node_id\":\"%s\",\"network\":\"%s\",\"auth\":\"%s\",\"seq\":%u}",
-        _config.nodeId,
-        _config.networkName,
-        authHex,
-        (unsigned)seq);
+  int written = snprintf(
+      payload,
+      sizeof(payload),
+      "{\"type\":\"join_req\",\"node_id\":\"%s\",\"network\":\"%s\",\"auth\":\"%s\",\"seq\":%u}",
+      _config.nodeId,
+      _config.networkName,
+      authHex,
+      (unsigned)seq);
 
   if (written <= 0 || written >= (int)sizeof(payload))
   {
@@ -186,60 +180,11 @@ bool BridgeMesh::sendHello()
   {
     unsigned long now = millis();
     _lastHelloTime = now;
-    // Liveness now relies on hello acknowledgements from the bridge.
-    _awaitingRouteResponse = true;
-    _routeQueryDeadline = now + _config.routeQueryTimeout;
-    // Stay in RX mode for a short guard window so hello_ack can be received.
+    _awaitingHelloAck = true;
+    _helloAckDeadline = now + _config.helloAckTimeout;
     _txHoldUntil = now + HELLO_RX_GUARD_MS;
   }
   return ok;
-}
-
-bool BridgeMesh::sendRouteQuery(const char *dst)
-{
-  if (!_joined || !dst || !dst[0])
-  {
-    return false;
-  }
-
-  if ((long)(millis() - _txHoldUntil) < 0)
-  {
-    return false;
-  }
-
-  char payload[180];
-  uint8_t seq = _seq++;
-
-  char encToken[48];
-  encToken[0] = '\0';
-
-  if (_token[0] != '\0')
-  {
-    decryptToken(_token, _config.joinKey, encToken, sizeof(encToken));
-  }
-
-  int written = snprintf(
-      payload,
-      sizeof(payload),
-      "{\"type\":\"route_query\",\"src\":\"%s\",\"dst\":\"%s\",\"token\":\"%s\",\"seq\":%u}",
-      _config.nodeId,
-      dst,
-      encToken,
-      (unsigned)seq);
-
-  if (written <= 0 || written >= (int)sizeof(payload))
-  {
-    return false;
-  }
-
-  if (!sendRaw(payload))
-  {
-    return false;
-  }
-
-  // Route checks are best-effort and do not affect join/liveness state.
-  _lastRouteQueryTime = millis();
-  return true;
 }
 
 bool BridgeMesh::sendJsonObject(const char *jsonObject, const char *type)
@@ -262,16 +207,16 @@ bool BridgeMesh::sendJsonObject(const char *jsonObject, const char *type)
     decryptToken(_token, _config.joinKey, encToken, sizeof(encToken));
   }
 
-  // Wrap application payload into mesh envelope.
-  // Mesh token is sent encrypted as before.
   char packet[240];
+  const char *dst = (_config.targetDst && _config.targetDst[0] != '\0') ? _config.targetDst : "dashboard";
 
   int written = snprintf(
       packet,
       sizeof(packet),
-      "{\"type\":\"%s\",\"node_id\":\"%s\",\"token\":\"%s\",\"payload\":%s}",
+      "{\"type\":\"%s\",\"node_id\":\"%s\",\"dst\":\"%s\",\"token\":\"%s\",\"payload\":%s}",
       type,
       _config.nodeId,
+      dst,
       encToken,
       jsonObject);
 
@@ -296,23 +241,15 @@ void BridgeMesh::tick()
     return;
   }
 
-  if (!_awaitingRouteResponse && (_lastHelloTime == 0 || (now - _lastHelloTime >= _config.helloInterval)))
+  if (!_awaitingHelloAck && (_lastHelloTime == 0 || (now - _lastHelloTime >= _config.helloInterval)))
   {
     sendHello();
   }
 
-  if (_config.routeDst && _config.routeDst[0] != '\0')
+  if (_awaitingHelloAck && (long)(now - _helloAckDeadline) >= 0)
   {
-    if (_lastRouteQueryTime == 0 || (now - _lastRouteQueryTime >= _config.routeQueryInterval))
-    {
-      sendRouteQuery(_config.routeDst);
-    }
-  }
-
-  if (_awaitingRouteResponse && (long)(now - _routeQueryDeadline) >= 0)
-  {
-    _awaitingRouteResponse = false;
-    _routeQueryDeadline = 0;
+    _awaitingHelloAck = false;
+    _helloAckDeadline = 0;
     _txHoldUntil = 0;
     _missedHelloAcks++;
 
@@ -325,7 +262,6 @@ void BridgeMesh::tick()
     }
     else
     {
-      // Retry hello after a short delay, but do not spam every loop.
       if (_config.helloInterval > HELLO_RETRY_AFTER_MISS_MS)
       {
         _lastHelloTime = now - (_config.helloInterval - HELLO_RETRY_AFTER_MISS_MS);
@@ -343,11 +279,12 @@ void BridgeMesh::poll(unsigned long maxMs)
 {
   unsigned long start = millis();
 
-while ((millis() - start) < maxMs)
+  while ((millis() - start) < maxMs)
   {
-    if (!_radio.available()) {
+    if (!_radio.available())
+    {
       delay(1);
-      continue; 
+      continue;
     }
 
     uint8_t recvBuf[RH_RF95_MAX_MESSAGE_LEN + 1];
@@ -370,15 +307,15 @@ while ((millis() - start) < maxMs)
 
 void BridgeMesh::handleControlMessage(const char *incoming)
 {
-  if (!incoming || !incoming[0]) return;
+  if (!incoming || !incoming[0])
+    return;
 
   Serial.println(incoming);
 
-  // Only care about explicit control types
   if (!contains(incoming, "\"type\":\"join_ack\"") &&
-      !contains(incoming, "\"type\":\"hello_ack\"") &&
-      !contains(incoming, "\"type\":\"route_resp\"")) {
-    return;  // ignore sensor_data and random JSON
+      !contains(incoming, "\"type\":\"hello_ack\""))
+  {
+    return;
   }
 
   if (contains(incoming, "\"type\":\"join_ack\""))
@@ -412,8 +349,8 @@ void BridgeMesh::handleControlMessage(const char *incoming)
       {
         _joined = false;
         _token[0] = '\0';
-        _awaitingRouteResponse = false;
-        _routeQueryDeadline = 0;
+        _awaitingHelloAck = false;
+        _helloAckDeadline = 0;
         _txHoldUntil = 0;
         _missedHelloAcks = 0;
         _lastJoinTime = 0;
@@ -421,19 +358,18 @@ void BridgeMesh::handleControlMessage(const char *incoming)
       }
 
       _joined = true;
-      _awaitingRouteResponse = false;
-      _routeQueryDeadline = 0;
+      _awaitingHelloAck = false;
+      _helloAckDeadline = 0;
       _txHoldUntil = 0;
       _missedHelloAcks = 0;
-      _lastRouteQueryTime = 0;
       _lastHelloTime = millis();
     }
     else
     {
       _joined = false;
       _token[0] = '\0';
-      _awaitingRouteResponse = false;
-      _routeQueryDeadline = 0;
+      _awaitingHelloAck = false;
+      _helloAckDeadline = 0;
       _txHoldUntil = 0;
       _missedHelloAcks = 0;
     }
@@ -448,14 +384,10 @@ void BridgeMesh::handleControlMessage(const char *incoming)
       return;
     }
 
-    _awaitingRouteResponse = false;
-    _routeQueryDeadline = 0;
+    _awaitingHelloAck = false;
+    _helloAckDeadline = 0;
     _txHoldUntil = 0;
     _missedHelloAcks = 0;
-  }
-  else if (contains(incoming, "\"type\":\"route_resp\""))
-  {
-    // Route responses are informational only; ignore for liveness decisions.
   }
 }
 
@@ -545,7 +477,8 @@ bool BridgeMesh::isLikelyJsonText(const uint8_t *buf, uint8_t len)
   while (start < len && (buf[start] == ' ' || buf[start] == '\t' || buf[start] == '\r' || buf[start] == '\n'))
     start++;
 
-  if (strstr((const char*)buf + start, "\"type\":\"") == nullptr) return false;
+  if (strstr((const char *)buf + start, "\"type\":\"") == nullptr)
+    return false;
 
   int end = len - 1;
   while (end >= 0 && (buf[end] == ' ' || buf[end] == '\t' || buf[end] == '\r' || buf[end] == '\n'))

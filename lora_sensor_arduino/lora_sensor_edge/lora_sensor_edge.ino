@@ -18,11 +18,10 @@ BridgeMeshConfig meshConfig = {
     "dht_sensor_A",
     "CSC2106_MESH",
     "mesh_key_v1",
-    "dashboard",
-    10000UL, // joinInterval
-    15000UL, // helloInterval
-    15000UL, // routeQueryInterval
-    3000UL   // routeQueryTimeout
+    "dashboard_main", // targetDst
+    10000UL,          // joinInterval
+    15000UL,          // helloInterval
+    3000UL            // helloAckTimeout
 };
 
 BridgeMesh mesh(rf95, meshConfig);
@@ -43,6 +42,7 @@ bool sendTelemetry()
   char tempStr[12];
   char humStr[12];
   char json[96];
+
   char type[24] = "sensor_data";
 
   dtostrf(temperature, 0, 1, tempStr);
@@ -106,6 +106,7 @@ void setup()
 void loop()
 {
   mesh.poll(20);
+
   mesh.tick();
 
   if (mesh.isJoined() && (millis() - lastTelemetryTime >= TELEMETRY_INTERVAL))

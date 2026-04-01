@@ -212,7 +212,7 @@ void setup()
     }
   }
 
-  rf95.setTxPower(10, false);
+  rf95.setTxPower(2, false);
   rf95.setModeRx();
 }
 

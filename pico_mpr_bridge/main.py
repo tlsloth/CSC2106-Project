@@ -37,6 +37,7 @@ def main():
     wifi_egress = PriorityQueue("wifi_egress")           # For MQTT to Dashboard
     lora_egress = PriorityQueue("lora_egress")           # For LoRa Mesh
     wifi_direct_egress = PriorityQueue("wifi_direct")    # For UDP Peer-to-Peer
+    ble_egress = PriorityQueue("ble_egress")             # For BLE Mesh (future)
 
     # --- Software watchdog ---
     def _on_watchdog():
@@ -192,9 +193,9 @@ def main():
                     elif protocol == "LoRa":
                         lora_egress.push(priority, pkt)
                     elif protocol == "BLE":
-                        wifi_egress.push(priority, pkt)
+                        ble_egress.push(priority, pkt)
                     else:
-                        wifi_egress.push(priority, pkt)
+                        wifi_direct_egress.push(priority, pkt)
 
                     logger.debug(TAG, "Routed pkt from {} to {} via {}".format(src, dst, protocol))
 
@@ -263,6 +264,13 @@ def main():
             from interfaces import ble_interface
             tasks.append(asyncio.create_task(
                 ble_interface.rx_task(ingress_queue, neighbour_table)))
+            tasks.append(asyncio.create_task(
+                ble_interface.tx_task(ble_egress)))
+            tasks.append(asyncio.create_task(
+                ble_interface.hello_task(neighbour_table)))
+            tasks.append(asyncio.create_task(
+                ble_interface.rx_server_task(ingress_queue, neighbour_table)))
+               
 
         # MQTT / WiFi Tasks
         if wifi_ok:

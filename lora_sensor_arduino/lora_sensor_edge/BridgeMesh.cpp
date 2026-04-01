@@ -175,7 +175,8 @@ bool BridgeMesh::sendHello()
   {
     return false;
   }
-
+  Serial.print("TX| ");
+  Serial.println(payload);
   bool ok = sendRaw(payload);
   if (ok)
   {
@@ -214,9 +215,10 @@ bool BridgeMesh::sendJsonObject(const char *jsonObject, const char *type)
   int written = snprintf(
       packet,
       sizeof(packet),
-      "{\"type\":\"%s\",\"node_id\":\"%s\",\"dst\":\"%s\",\"token\":\"%s\",\"payload\":%s}",
+      "{\"type\":\"%s\",\"node_id\":\"%s\",\"hop_dst\":\"%s\",\"dst\":\"%s\",\"token\":\"%s\",\"payload\":%s}",
       type,
       _config.nodeId,
+      _bridgeId,
       dst,
       encToken,
       jsonObject);

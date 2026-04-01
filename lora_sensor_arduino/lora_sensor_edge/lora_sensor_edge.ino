@@ -93,7 +93,7 @@ void setup()
     }
   }
 
-  rf95.setTxPower(13, false);
+  rf95.setTxPower(2, false);
   mesh.begin();
 }
 

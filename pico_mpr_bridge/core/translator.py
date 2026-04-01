@@ -253,6 +253,29 @@ def decode_lora_hex(hex_str):
                 "token": ubinascii.hexlify(u[4]).decode('utf-8'),
                 "payload": {"temp": u[5]/10.0, "hum": u[6]/10.0}
             }
+
+        # --- NEW: 0x05 ROUTE QUERY (< B 16s 16s) ---
+        elif ptype == 0x05 and len(b) == 33:
+            u = struct.unpack('<B 16s 16s', b)
+            return {
+                "kind": "control", "type": "route_query",
+                "src": u[1].decode('utf-8').strip('\x00'),
+                "dst": u[2].decode('utf-8').strip('\x00')
+            }
+
+        # --- NEW: 0x06 ROUTE RESP (< B 16s 16s 16s 12s H B) ---
+        elif ptype == 0x06 and len(b) == 64:
+            u = struct.unpack('<B 16s 16s 16s 12s H B', b)
+            return {
+                "kind": "control", "type": "route_resp",
+                "req_src": u[1].decode('utf-8').strip('\x00'),
+                "dst": u[2].decode('utf-8').strip('\x00'),
+                "next_hop": u[3].decode('utf-8').strip('\x00'),
+                "via_protocol": u[4].decode('utf-8').strip('\x00'),
+                "cost": u[5],
+                "status": "ok" if u[6] == 1 else "no_route"
+            }
+
     except Exception as e:
         pass
     return None
@@ -277,6 +300,29 @@ def encode_lora_hex(pkt):
             bid = pkt.get("bridge_id", "").encode('utf-8')[:15]
             b = struct.pack('<B 16s 16s', 0x03, tid, bid)
             return ubinascii.hexlify(b).decode('utf-8')
-    except Exception:
-        pass
+
+        # --- NEW: 0x05 ROUTE QUERY (< B 16s 16s) ---
+        elif ptype == "route_query":
+            src = pkt.get("src", "").encode('utf-8')[:15]
+            dst = pkt.get("dst", "").encode('utf-8')[:15]
+            b = struct.pack('<B 16s 16s', 0x05, src, dst)
+            return ubinascii.hexlify(b).decode('utf-8')
+
+        # --- NEW: 0x06 ROUTE RESP (< B 16s 16s 16s 12s H B) ---
+        elif ptype == "route_resp":
+            req_src = pkt.get("req_src", "").encode('utf-8')[:15]
+            dst = pkt.get("dst", "").encode('utf-8')[:15]
+            nhop = pkt.get("next_hop", "").encode('utf-8')[:15]
+            
+            proto = pkt.get("via_protocol", "")
+            proto_bytes = proto.encode('utf-8')[:11] if proto else b''
+            
+            cost = int(pkt.get("cost", 999))
+            status = 1 if pkt.get("status") == "ok" else 0
+            
+            b = struct.pack('<B 16s 16s 16s 12s H B', 0x06, req_src, dst, nhop, proto_bytes, cost, status)
+            return ubinascii.hexlify(b).decode('utf-8')
+
+    except Exception as e:
+        print("Hex Encode Error:", e)
     return None

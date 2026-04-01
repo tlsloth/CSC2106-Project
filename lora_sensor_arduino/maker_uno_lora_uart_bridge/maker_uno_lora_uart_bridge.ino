@@ -70,22 +70,23 @@ void sendHexLoRaPayload(const char *hexPayload)
   }
 
   delay(5);
+  
+  unsigned long txStartTime = millis();
   rf95.send(binBuf, binLen);
   bool txOk = rf95.waitPacketSent(3000);
+  unsigned long txDuration = millis() - txStartTime;
 
-  if (!txOk)
+// If it timed out, OR if it claimed to finish in under 5 milliseconds (physically impossible)
+  if (!txOk || txDuration < 5)
   {
-    // HARDWARE RECOVERY: The SX1276 chip has wedged. Reboot the silicon.
-    digitalWrite(RFM95_RST, LOW);
-    delay(10);
-    digitalWrite(RFM95_RST, HIGH);
-    delay(10);
-    rf95.init();
-    rf95.setFrequency(RF95_FREQ);
-    rf95.setTxPower(2, false); // Keep at 2dBm for desk testing!
+    BRIDGE_UART.println("LORA_ERR|TX_FAILED_OR_FAKE_SUCCESS");
+    forceRebootRadio("TX_FAULT");
   }
-
-  BRIDGE_UART.println("LORA_STATUS|TX_DONE");
+  else 
+  {
+    BRIDGE_UART.println("LORA_STATUS|TX_DONE");
+  }
+  
   delay(5);
   rf95.setModeRx();
 }
@@ -164,6 +165,62 @@ void pollLoraRx()
   forwardRawFrameToPico(buf, len, rssi);
 }
 
+// --- SILICON HEALTH & WATCHDOG CHECK ---
+unsigned long lastHealthCheck = 0;
+unsigned long lastForceReboot = 0;
+const unsigned long FORCE_REBOOT_INTERVAL = 60000UL; // 1 minutes in milliseconds
+
+// A clean helper function so we don't repeat the reset code 3 times!
+void forceRebootRadio(const char* reason) {
+  BRIDGE_UART.print("LORA_STATUS|REBOOTING|");
+  BRIDGE_UART.println(reason);
+  
+  // Hard-reset the silicon
+  digitalWrite(RFM95_RST, LOW);
+  delay(10);
+  digitalWrite(RFM95_RST, HIGH);
+  delay(10);
+  
+  // Reinitialize
+  if (rf95.init()) {
+    rf95.setFrequency(RF95_FREQ);
+    rf95.setTxPower(2, false); // 2dBm for desk testing
+    rf95.setModeRx();
+    BRIDGE_UART.println("LORA_STATUS|RADIO_RECOVERED");
+  } else {
+    BRIDGE_UART.println("LORA_ERR|RADIO_INIT_FAILED");
+  }
+}
+
+void checkRadioHealth() {
+  unsigned long now = millis();
+
+  // 1. THE PREVENTATIVE REBOOT (Every 5 Minutes)
+  if (now - lastForceReboot >= FORCE_REBOOT_INTERVAL) {
+    lastForceReboot = now;
+    lastHealthCheck = now; // Sync the timers
+    forceRebootRadio("PERIODIC_PREVENTATIVE");
+    return;
+  }
+
+  // 2. THE SPI SILICON CHECK (Every 5 Seconds)
+  if (now - lastHealthCheck >= 5000) {
+    lastHealthCheck = now;
+    
+    // Manually bypass RadioHead and read the SX1276 hardware version register (0x42)
+    digitalWrite(RFM95_CS, LOW);
+    SPI.transfer(0x42 & 0x7F); 
+    uint8_t version = SPI.transfer(0);
+    digitalWrite(RFM95_CS, HIGH);
+
+    // If the chip returns 0x00 or 0xFF, the SPI bus or the silicon is dead!
+    if (version == 0x00 || version == 0xFF) {
+      lastForceReboot = now; // Reset the 5-min timer so we don't double-reboot
+      forceRebootRadio("ZOMBIE_RADIO_DETECTED");
+    }
+  }
+}
+
 void setup()
 {
   BRIDGE_UART.begin(PICO_BAUD);
@@ -192,4 +249,5 @@ void loop()
 {
   pollPicoUart();
   pollLoraRx();
+  checkRadioHealth();
 }

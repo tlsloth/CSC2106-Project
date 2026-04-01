@@ -306,7 +306,8 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                 else:
                                     _node_tokens.pop(node_id, None)
                                     logger.warn(TAG, "Join rejected for {} ({})".format(source_id, reason))
-                                await asyncio.sleep(random.randint(100, 500))  # Mitigate join ack collisions
+
+                                await asyncio.sleep_ms(random.randint(100, 500))  # Mitigate join ack collisions
                                 _send_join_ack(msg, ok, egress_queue, reason, token)
                                 continue
 

@@ -261,17 +261,14 @@ def main():
 
         # BLE Tasks
         if ble_ok:
-            from interfaces import ble_interface
             tasks.append(asyncio.create_task(
-                ble_interface.rx_task(ingress_queue, neighbour_table)))
+                ble_interface.rx_task(ingress_queue, ble_egress, neighbour_table)))  # ← must be here
             tasks.append(asyncio.create_task(
-                ble_interface.tx_task(ble_egress)))
+                ble_interface.tx_task(ble_egress, neighbour_table)))
             tasks.append(asyncio.create_task(
-                ble_interface.hello_task(neighbour_table)))
-            tasks.append(asyncio.create_task(
-                ble_interface.rx_server_task(ingress_queue, neighbour_table)))
-               
+                ble_interface.hello_task()))
 
+               
         # MQTT / WiFi Tasks
         if wifi_ok:
             from interfaces import wifi_interface

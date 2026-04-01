@@ -3,7 +3,7 @@
 # Node identity
 NODE_ID         = "bridge_A"
 NODE_ROLE       = "bridge"          # "bridge" | "sensor" | "dashboard"
-CAPABILITIES    = ["LoRa", "WiFi-Direct"] 
+CAPABILITIES    = ["BLE"] 
 
 # WiFi credentials
 WIFI_SSID       = "Gigachad Laptop"
@@ -75,9 +75,10 @@ BLE_DEVICE_NAME     = "PicoUltrasonic"                        # Name of BLE sens
 BLE_SCAN_DURATION   = 5000          # ms per scan cycle
 BLE_SCAN_INTERVAL   = 10000         # ms between scan cycles
 BLE_CONN_TIMEOUT    = 10000         # ms connection timeout
-BLE_DISCOVERY_DELAY_MS = 250        # wait after connect before service discovery
-BLE_DISCOVERY_TIMEOUT_MS = 4000     # service/characteristic discovery timeout
+BLE_DISCOVERY_DELAY_MS = 500        # wait after connect before service discovery
+BLE_DISCOVERY_TIMEOUT_MS = 6000     # service/characteristic discovery timeout
 BLE_DISCOVERY_RETRIES = 3           # retries for flaky BLE discovery on Pico W
+BLE_TRUSTED_SENSORS = ["PicoUltrasonic"] 
 
 # Packet settings
 PACKET_TTL          = 5             # Max hops before packet is dropped

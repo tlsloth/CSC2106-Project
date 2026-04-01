@@ -78,7 +78,7 @@ def _send_join_ack(req_msg, accepted, egress_queue, reason="ok", token=""):
         "accepted": bool(accepted),
         "src": config.NODE_ID,
         "bridge_id": config.NODE_ID,
-        "dst": node_id,
+        "target_id": node_id,
         "reason": reason,
         "token": encrypted_token,
     }
@@ -219,6 +219,7 @@ def is_available():
 
 
 async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=None):
+    import random
     from core.translator import translate_lora_payload
     global _rx_buf, _uart
 
@@ -305,6 +306,7 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                 else:
                                     _node_tokens.pop(node_id, None)
                                     logger.warn(TAG, "Join rejected for {} ({})".format(source_id, reason))
+                                await asyncio.sleep(random.randint(100, 500))  # Mitigate join ack collisions
                                 _send_join_ack(msg, ok, egress_queue, reason, token)
                                 continue
 

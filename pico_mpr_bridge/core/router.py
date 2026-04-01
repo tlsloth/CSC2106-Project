@@ -6,41 +6,46 @@ import time
 
 TAG = "RTR"
 
-# Cost lookup for protocol translation pairs
-_COST_MAP = {
-    ("LoRa", "LoRa"):  config.COST_NATIVE,
-    ("WiFi-Direct", "WiFi-Direct"):  config.COST_NATIVE,
-    ("BLE", "BLE"):    config.COST_NATIVE,
-    ("MQTT", "MQTT"):  config.COST_NATIVE,
-    ("WiFi-Direct", "MQTT"): 5,
-    ("LoRa", "WiFi-Direct"):  config.COST_LORA_WIFI,
-    ("WiFi-Direct", "LoRa"):  config.COST_LORA_WIFI,
-    ("BLE", "WiFi-Direct"):   config.COST_BLE_WIFI,
-    ("WiFi-Direct", "BLE"):   config.COST_BLE_WIFI,
-    ("LoRa", "BLE"):   config.COST_LORA_BLE,
-    ("BLE", "LoRa"):   config.COST_LORA_BLE,
+# Protocol Base Costs (Lower = Higher Bandwidth / Preference)
+_PROTOCOL_BASE_COST = {
+    "MQTT": 10,
+    "LOCAL": 10,
+    "WiFi-Direct": 15,
+    "WiFi": 15,
+    "BLE": 50,
+    "LoRa": 200
 }
 
-
-def get_translation_cost(proto_a, proto_b):
-    """Return the cost of translating between two protocols."""
-    if proto_a == proto_b:
-        return config.COST_NATIVE
-    return _COST_MAP.get((proto_a, proto_b), 10)  # default high cost for unknown pairs
-
-def _calculate_rssi_penalty(rssi):
-    """Calculates penalty based on signal strength"""
-    if rssi == 0:
-        return 2
+def _calculate_rssi_multiplier(rssi):
+    """Calculates penalty multiplier based on signal strength."""
+    if rssi == 0:  # Usually means local, MQTT, or unknown (assume perfect)
+        return 1.0
     if rssi >= -65:
-        return 0
+        return 1.0
     elif rssi >= -85:
-        return 1
+        return 1.2
     elif rssi >= -100:
-        return 3
+        return 1.5
     else:
-        return 6
+        return 2.0
 
+def get_edge_cost(protos_a, protos_b, rssi):
+    """Finds the best shared protocol and calculates the physical link cost."""
+    # To communicate over the air, nodes MUST share at least one protocol
+    shared_protocols = set(protos_a).intersection(set(protos_b))
+    
+    if not shared_protocols:
+        return float("inf") # No shared language over the air!
+        
+    # Find the absolute fastest (cheapest) shared protocol
+    min_base_cost = float("inf")
+    for p in shared_protocols:
+        cost = _PROTOCOL_BASE_COST.get(p, 500) # Default huge cost for unknown
+        if cost < min_base_cost:
+            min_base_cost = cost
+            
+    multiplier = _calculate_rssi_multiplier(rssi)
+    return min_base_cost * multiplier
 
 def build_graph(neighbour_table, self_id=None):
     """Build a weighted graph from the neighbour table for Dijkstra.
@@ -57,46 +62,36 @@ def build_graph(neighbour_table, self_id=None):
     graph = {n: {} for n in nodes}
 
     # Edges from self to direct neighbours
+# 1. Edges from self to direct neighbours
     self_protos = config.CAPABILITIES
     for nid, entry in all_entries.items():
         if entry.get("via"):
-            # 2-hop neighbour — don't add direct edge from self
-            continue
+            continue # 2-hop neighbour
+            
         nbr_protos = entry.get("protocols", [])
-        # Find minimum cost across protocol pairs
-        rssi = entry.get("rssi",0)
-        rssi_penalty = _calculate_rssi_penalty(rssi)
+        rssi = entry.get("rssi", 0)
         
-        min_cost = float("inf")
-        for sp in self_protos:
-            for np in nbr_protos:
-                c = get_translation_cost(sp, np)
-                if c < min_cost:
-                    min_cost = c
-        if min_cost < float("inf"):
-            final_cost = min_cost + rssi_penalty
+        # NEW MATH: Calculate link cost based on shared protocols and RSSI
+        final_cost = get_edge_cost(self_protos, nbr_protos, rssi)
+        
+        if final_cost < float("inf"):
             graph[self_id][nid] = final_cost
             graph[nid][self_id] = final_cost
 
-    # Edges between remote neighbours (from merged topology)
+    # 2. Edges between remote neighbours (from merged topology)
     for nid, entry in all_entries.items():
         via = entry.get("via")
         if via and via in graph:
             nbr_protos = entry.get("protocols", [])
             via_protos = all_entries.get(via, {}).get("protocols", [])
             rssi = entry.get("rssi", 0)
-            rssi_penalty = _calculate_rssi_penalty(rssi)
-            min_cost = float("inf")
-            for vp in via_protos:
-                for np in nbr_protos:
-                    c = get_translation_cost(vp, np)
-                    if c < min_cost:
-                        min_cost = c
-            if min_cost < float("inf"):
-                final_cost = min_cost + rssi_penalty
+            
+            # NEW MATH: Calculate link cost
+            final_cost = get_edge_cost(via_protos, nbr_protos, rssi)
+            
+            if final_cost < float("inf"):
                 graph.setdefault(via, {})[nid] = final_cost
                 graph.setdefault(nid, {})[via] = final_cost
-
     return graph
 
 
@@ -223,7 +218,7 @@ class RoutingTable:
 
 
 def _determine_protocol(next_hop, all_entries):
-    """Determine the best protocol to reach the next hop."""
+    """Determine the fastest protocol to reach the next hop."""
     entry = all_entries.get(next_hop)
     if not entry:
         return "WiFi-Direct"  # fallback
@@ -231,8 +226,8 @@ def _determine_protocol(next_hop, all_entries):
     protocols = entry.get("protocols", [])
     my_protos = config.CAPABILITIES
 
-    # Prefer native protocols in order: LoRa > BLE > WiFi
-    for preferred in ["LoRa", "BLE", "WiFi", "MQTT"]:
+    # FIX: Prefer high-bandwidth protocols first!
+    for preferred in ["MQTT", "WiFi-Direct", "WiFi", "BLE", "LoRa"]:
         if preferred in protocols and preferred in my_protos:
             return preferred
 

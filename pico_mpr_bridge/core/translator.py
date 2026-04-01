@@ -4,6 +4,9 @@ import json
 import config
 from core import packet
 from utils import logger
+import struct
+import ubinascii
+
 
 TAG = "XLAT"
 
@@ -209,3 +212,71 @@ def translate_ble_payload(raw_bytes, source_id="unknown"):
     except Exception as e:
         logger.error(TAG, "BLE payload translation error: {}".format(e))
         return None
+
+
+
+def decode_lora_hex(hex_str):
+    """Unpacks Hex strings from the Uno back into standard Mesh JSON dicts."""
+    try:
+        b = ubinascii.unhexlify(hex_str.strip())
+        ptype = b[0]
+        
+        # 0x00: JOIN REQ (< B 16s 16s I B)
+        if ptype == 0x00 and len(b) == 38:
+            u = struct.unpack('<B 16s 16s I B', b)
+            return {
+                "kind": "control", "type": "join_req",
+                "node_id": u[1].decode('utf-8').strip('\x00'),
+                "network": u[2].decode('utf-8').strip('\x00'),
+                "auth": f"{u[3]:08x}", "seq": u[4]
+            }
+            
+        # 0x02: HELLO (< B 16s 16s 8s B)
+        elif ptype == 0x02 and len(b) == 42:
+            u = struct.unpack('<B 16s 16s 8s B', b)
+            return {
+                "kind": "control", "type": "hello",
+                "node_id": u[1].decode('utf-8').strip('\x00'),
+                "network": u[2].decode('utf-8').strip('\x00'),
+                "token": ubinascii.hexlify(u[3]).decode('utf-8'),
+                "seq": u[4]
+            }
+            
+        # 0x04: TELEMETRY (< B 16s 16s 16s 8s h H)
+        elif ptype == 0x04 and len(b) == 61:
+            u = struct.unpack('<B 16s 16s 16s 8s h H', b)
+            return {
+                "kind": "data", "type": "sensor_data",
+                "node_id": u[1].decode('utf-8').strip('\x00'),
+                "hop_dst": u[2].decode('utf-8').strip('\x00'),
+                "dst": u[3].decode('utf-8').strip('\x00'),
+                "token": ubinascii.hexlify(u[4]).decode('utf-8'),
+                "payload": {"temp": u[5]/10.0, "hum": u[6]/10.0}
+            }
+    except Exception as e:
+        pass
+    return None
+
+def encode_lora_hex(pkt):
+    """Packs JSON Mesh dicts into binary Hex Strings for the Uno to transmit."""
+    ptype = pkt.get("type")
+    try:
+        # 0x01: JOIN ACK (< B 16s B 16s 8s)
+        if ptype == "join_ack":
+            tid = pkt.get("target_id", "").encode('utf-8')[:15]
+            acc = 1 if pkt.get("accepted") else 0
+            bid = pkt.get("bridge_id", "").encode('utf-8')[:15]
+            tok_hex = pkt.get("token", "")
+            tok_bytes = ubinascii.unhexlify(tok_hex) if tok_hex else b'\x00'*8
+            b = struct.pack('<B 16s B 16s 8s', 0x01, tid, acc, bid, tok_bytes)
+            return ubinascii.hexlify(b).decode('utf-8')
+            
+        # 0x03: HELLO ACK (< B 16s 16s)
+        elif ptype == "hello_ack":
+            tid = pkt.get("target_id", "").encode('utf-8')[:15]
+            bid = pkt.get("bridge_id", "").encode('utf-8')[:15]
+            b = struct.pack('<B 16s 16s', 0x03, tid, bid)
+            return ubinascii.hexlify(b).decode('utf-8')
+    except Exception:
+        pass
+    return None

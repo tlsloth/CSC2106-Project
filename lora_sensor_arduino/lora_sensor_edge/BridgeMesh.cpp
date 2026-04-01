@@ -18,55 +18,9 @@ BridgeMesh::BridgeMesh(RH_RF95 &radio, const BridgeMeshConfig &config)
       _helloAckDeadline(0),
       _txHoldUntil(0)
 {
-  _token[0] = '\0';
+  memset(_token, 0, sizeof(_token));
   strncpy(_bridgeId, "bridge_01", sizeof(_bridgeId) - 1);
   _bridgeId[sizeof(_bridgeId) - 1] = '\0';
-}
-
-bool BridgeMesh::begin()
-{
-  _joined = false;
-  _awaitingHelloAck = false;
-  _missedHelloAcks = 0;
-  _seq = 0;
-  _lastJoinTime = 0;
-  _lastHelloTime = 0;
-  _helloAckDeadline = 0;
-  _txHoldUntil = 0;
-  _token[0] = '\0';
-  randomSeed(micros());
-  return sendJoinRequest();
-}
-
-const BridgeMeshConfig &BridgeMesh::config() const
-{
-  return _config;
-}
-
-bool BridgeMesh::isJoined() const
-{
-  return _joined;
-}
-
-const char *BridgeMesh::token() const
-{
-  return _token;
-}
-
-const char *BridgeMesh::bridgeId() const
-{
-  return _bridgeId;
-}
-
-bool BridgeMesh::sendRaw(const char *payload)
-{
-  if (!payload || !payload[0])
-    return false;
-
-  _radio.send((const uint8_t *)payload, strlen(payload));
-  _radio.waitPacketSent();
-  _radio.setModeRx();
-  return true;
 }
 
 uint32_t BridgeMesh::fnv1a32(const char *str)
@@ -80,157 +34,111 @@ uint32_t BridgeMesh::fnv1a32(const char *str)
   return hash;
 }
 
-bool BridgeMesh::decryptToken(const char *encoded, const char *key, char *out, size_t outSize)
+void BridgeMesh::xorTokenBytes(const uint8_t *in, uint8_t *out)
 {
-  size_t hexLen = strlen(encoded);
-  if (hexLen == 0 || (hexLen % 2) != 0)
-    return false;
-
-  size_t byteCount = hexLen / 2;
-  if (byteCount * 2 + 1 > outSize)
-    return false;
-
-  size_t keyLen = strlen(key);
+  size_t keyLen = strlen(_config.joinKey);
   if (keyLen == 0)
-    return false;
-
-  for (size_t i = 0; i < byteCount; i++)
+    return;
+  for (int i = 0; i < 8; i++)
   {
-    char hi = encoded[i * 2];
-    char lo = encoded[i * 2 + 1];
-
-    uint8_t h = (hi >= '0' && hi <= '9')   ? hi - '0'
-                : (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10
-                                           : hi - 'A' + 10;
-    uint8_t l = (lo >= '0' && lo <= '9')   ? lo - '0'
-                : (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10
-                                           : lo - 'A' + 10;
-
-    uint8_t b = ((h << 4) | l) ^ (uint8_t)key[i % keyLen];
-    snprintf(out + i * 2, 3, "%02x", b);
+    out[i] = in[i] ^ (uint8_t)_config.joinKey[i % keyLen];
   }
-  return true;
+}
+
+bool BridgeMesh::begin()
+{
+  _joined = false;
+  _awaitingHelloAck = false;
+  _missedHelloAcks = 0;
+  _seq = 0;
+  _lastJoinTime = 0;
+  _lastHelloTime = 0;
+  _helloAckDeadline = 0;
+  _txHoldUntil = 0;
+  memset(_token, 0, sizeof(_token));
+  randomSeed(micros());
+  return sendJoinRequest();
+}
+
+const char *BridgeMesh::bridgeId() const
+{
+  return _bridgeId;
+}
+
+bool BridgeMesh::isJoined() const
+{
+  return _joined;
 }
 
 bool BridgeMesh::sendJoinRequest()
 {
-  Serial.println("Trying to connect to mesh...");
-  char payload[180];
+  Serial.println("TX| JoinReq (Binary)");
+  LoRaJoinReq req = {0};
+  req.type = 0x00;
+  strncpy(req.node_id, _config.nodeId, 15);
+  strncpy(req.network, _config.networkName, 15);
+  req.auth = fnv1a32(_config.joinKey);
+  req.seq = _seq++;
 
-  uint8_t seq = _seq++;
-
-  char authHex[9];
-  snprintf(authHex, sizeof(authHex), "%08lx", (unsigned long)fnv1a32(_config.joinKey));
-
-  int written = snprintf(
-      payload,
-      sizeof(payload),
-      "{\"type\":\"join_req\",\"node_id\":\"%s\",\"network\":\"%s\",\"auth\":\"%s\",\"seq\":%u}",
-      _config.nodeId,
-      _config.networkName,
-      authHex,
-      (unsigned)seq);
-
-  if (written <= 0 || written >= (int)sizeof(payload))
-  {
-    return false;
-  }
-  Serial.print("TX| ");
-  Serial.println(payload);
-
-  bool ok = sendRaw(payload);
-  if (ok)
-  {
-    _lastJoinTime = millis();
-  }
-  return ok;
+  _radio.send((const uint8_t *)&req, sizeof(req));
+  _radio.waitPacketSent();
+  _radio.setModeRx();
+  _lastJoinTime = millis();
+  return true;
 }
 
 bool BridgeMesh::sendHello()
 {
   if (!_joined)
     return false;
+  Serial.println("TX| Hello (Binary)");
 
-  char payload[180];
-  uint8_t seq = _seq++;
+  LoRaHello hello = {0};
+  hello.type = 0x02;
+  strncpy(hello.node_id, _config.nodeId, 15);
+  strncpy(hello.network, _config.networkName, 15);
+  xorTokenBytes(_token, hello.token);
+  hello.seq = _seq++;
 
-  char encToken[48];
-  encToken[0] = '\0';
+  _radio.send((const uint8_t *)&hello, sizeof(hello));
+  _radio.waitPacketSent();
+  _radio.setModeRx();
 
-  if (_token[0] != '\0')
-  {
-    decryptToken(_token, _config.joinKey, encToken, sizeof(encToken));
-  }
-
-  int written = snprintf(
-      payload,
-      sizeof(payload),
-      "{\"type\":\"hello\",\"node_id\":\"%s\",\"network\":\"%s\",\"token\":\"%s\",\"seq\":%u}",
-      _config.nodeId,
-      _config.networkName,
-      encToken,
-      (unsigned)seq);
-
-  if (written <= 0 || written >= (int)sizeof(payload))
-  {
-    return false;
-  }
-  Serial.print("TX| ");
-  Serial.println(payload);
-  bool ok = sendRaw(payload);
-  if (ok)
-  {
-    unsigned long now = millis();
-    _lastHelloTime = now;
-    _awaitingHelloAck = true;
-    _helloAckDeadline = now + _config.helloAckTimeout;
-    _txHoldUntil = now + HELLO_RX_GUARD_MS;
-  }
-  return ok;
+  unsigned long now = millis();
+  _lastHelloTime = now;
+  _awaitingHelloAck = true;
+  _helloAckDeadline = now + _config.helloAckTimeout;
+  _txHoldUntil = now + HELLO_RX_GUARD_MS;
+  return true;
 }
 
-bool BridgeMesh::sendJsonObject(const char *jsonObject, const char *type)
+bool BridgeMesh::sendTelemetry(float temp, float hum)
 {
-  if (!_joined || !jsonObject || jsonObject[0] != '{')
-  {
+  if (!_joined)
     return false;
-  }
 
   if ((long)(millis() - _txHoldUntil) < 0)
   {
     return false;
   }
 
-  char encToken[48];
-  encToken[0] = '\0';
+  Serial.println("TX| Telemetry (Binary)");
 
-  if (_token[0] != '\0')
-  {
-    decryptToken(_token, _config.joinKey, encToken, sizeof(encToken));
-  }
+  LoRaTelemetry tel = {0};
+  tel.type = 0x04;
+  strncpy(tel.node_id, _config.nodeId, 15);
+  strncpy(tel.hop_dst, _bridgeId, 15);
+  strncpy(tel.dst, _config.targetDst, 15);
+  xorTokenBytes(_token, tel.token);
 
-  char packet[240];
-  const char *dst = (_config.targetDst && _config.targetDst[0] != '\0') ? _config.targetDst : "dashboard";
+  // Scale floats to integers to save bytes!
+  tel.temp = (int16_t)(temp * 10.0);
+  tel.hum = (uint16_t)(hum * 10.0);
 
-  int written = snprintf(
-      packet,
-      sizeof(packet),
-      "{\"type\":\"%s\",\"node_id\":\"%s\",\"hop_dst\":\"%s\",\"dst\":\"%s\",\"token\":\"%s\",\"payload\":%s}",
-      type,
-      _config.nodeId,
-      _bridgeId,
-      dst,
-      encToken,
-      jsonObject);
-
-  if (written <= 0 || written >= (int)sizeof(packet))
-  {
-    return false;
-  }
-  Serial.print("TX| ");
-  Serial.println(packet);
-
-  return sendRaw(packet);
+  _radio.send((const uint8_t *)&tel, sizeof(tel));
+  _radio.waitPacketSent();
+  _radio.setModeRx();
+  return true;
 }
 
 void BridgeMesh::tick()
@@ -261,7 +169,7 @@ void BridgeMesh::tick()
     if (_missedHelloAcks >= HELLO_ACK_MISS_THRESHOLD)
     {
       _joined = false;
-      _token[0] = '\0';
+      memset(_token, 0, sizeof(_token));
       _lastJoinTime = 0;
       _missedHelloAcks = 0;
     }
@@ -292,202 +200,63 @@ void BridgeMesh::poll(unsigned long maxMs)
       continue;
     }
 
-    uint8_t recvBuf[RH_RF95_MAX_MESSAGE_LEN + 1];
-    uint8_t recvLen = RH_RF95_MAX_MESSAGE_LEN;
+    uint8_t recvBuf[RH_RF95_MAX_MESSAGE_LEN];
+    uint8_t recvLen = sizeof(recvBuf);
 
-    if (!_radio.recv(recvBuf, &recvLen))
+    if (_radio.recv(recvBuf, &recvLen))
     {
-      break;
+      handleControlMessage(recvBuf, recvLen);
     }
-
-    if (!isLikelyJsonText(recvBuf, recvLen))
-    {
-      continue;
-    }
-
-    recvBuf[recvLen] = '\0';
-    handleControlMessage((const char *)recvBuf);
   }
 }
 
-void BridgeMesh::handleControlMessage(const char *incoming)
+void BridgeMesh::handleControlMessage(const uint8_t *incoming, uint8_t len)
 {
-  if (!incoming || !incoming[0])
+  if (len == 0)
     return;
-  Serial.print("RX| ");
-  Serial.println(incoming);
 
-  if (!contains(incoming, "\"type\":\"join_ack\"") &&
-      !contains(incoming, "\"type\":\"hello_ack\""))
+  // 0x01 = Join Ack
+  if (incoming[0] == 0x01 && len == sizeof(LoRaJoinAck))
   {
-    return;
-  }
-
-  if (contains(incoming, "\"type\":\"join_ack\""))
-  {
-    char targetId[32];
-    targetId[0] = '\0';
-    extractJsonString(incoming, "target_id", targetId, sizeof(targetId));
-    if (targetId[0] && strcmp(targetId, _config.nodeId) != 0)
-    {
+    LoRaJoinAck *ack = (LoRaJoinAck *)incoming;
+    if (strcmp(ack->target_id, _config.nodeId) != 0)
       return;
-    }
 
-    if (extractJsonBool(incoming, "accepted"))
+    if (ack->accepted)
     {
-      char bridgeId[20];
-      char encToken[48];
-
-      bridgeId[0] = '\0';
-      encToken[0] = '\0';
-
-      extractJsonString(incoming, "bridge_id", bridgeId, sizeof(bridgeId));
-      extractJsonString(incoming, "token", encToken, sizeof(encToken));
-
-      if (bridgeId[0] != '\0')
-      {
-        strncpy(_bridgeId, bridgeId, sizeof(_bridgeId) - 1);
-        _bridgeId[sizeof(_bridgeId) - 1] = '\0';
-      }
-
-      if (encToken[0] == '\0' || !decryptToken(encToken, _config.joinKey, _token, sizeof(_token)))
-      {
-        _joined = false;
-        _token[0] = '\0';
-        _awaitingHelloAck = false;
-        _helloAckDeadline = 0;
-        _txHoldUntil = 0;
-        _missedHelloAcks = 0;
-        _lastJoinTime = 0;
-        return;
-      }
-
+      strncpy(_bridgeId, ack->bridge_id, 15);
+      _bridgeId[15] = '\0';
+      xorTokenBytes(ack->token, _token);
       _joined = true;
       _awaitingHelloAck = false;
       _helloAckDeadline = 0;
       _txHoldUntil = 0;
       _missedHelloAcks = 0;
       _lastHelloTime = millis();
+      Serial.println("RX| Join Accepted!");
     }
     else
     {
       _joined = false;
-      _token[0] = '\0';
+      memset(_token, 0, sizeof(_token));
       _awaitingHelloAck = false;
       _helloAckDeadline = 0;
       _txHoldUntil = 0;
       _missedHelloAcks = 0;
+      Serial.println("RX| Join Rejected!");
     }
   }
-  else if (contains(incoming, "\"type\":\"hello_ack\""))
+  // 0x03 = Hello Ack
+  else if (incoming[0] == 0x03 && len == sizeof(LoRaHelloAck))
   {
-    char targetId[32];
-    targetId[0] = '\0';
-    extractJsonString(incoming, "target_id", targetId, sizeof(targetId));
-    if (targetId[0] && strcmp(targetId, _config.nodeId) != 0)
+    LoRaHelloAck *ack = (LoRaHelloAck *)incoming;
+    if (strcmp(ack->target_id, _config.nodeId) == 0)
     {
-      return;
+      _awaitingHelloAck = false;
+      _helloAckDeadline = 0;
+      _txHoldUntil = 0;
+      _missedHelloAcks = 0;
+      Serial.println("RX| Hello Ack!");
     }
-
-    _awaitingHelloAck = false;
-    _helloAckDeadline = 0;
-    _txHoldUntil = 0;
-    _missedHelloAcks = 0;
   }
-}
-
-bool BridgeMesh::contains(const char *haystack, const char *needle)
-{
-  return strstr(haystack, needle) != nullptr;
-}
-
-int BridgeMesh::findJsonValueStart(const char *json, const char *key)
-{
-  if (!json || !key)
-    return -1;
-
-  char needle[24];
-  snprintf(needle, sizeof(needle), "\"%s\"", key);
-
-  const char *keyPos = strstr(json, needle);
-  if (!keyPos)
-    return -1;
-
-  const char *colon = strchr(keyPos + strlen(needle), ':');
-  if (!colon)
-    return -1;
-
-  const char *p = colon + 1;
-  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
-    p++;
-
-  return (int)(p - json);
-}
-
-bool BridgeMesh::extractJsonBool(const char *json, const char *key)
-{
-  int start = findJsonValueStart(json, key);
-  if (start < 0)
-    return false;
-
-  const char *p = json + start;
-  return (strncmp(p, "true", 4) == 0) || (*p == '1');
-}
-
-bool BridgeMesh::extractJsonString(const char *json, const char *key, char *out, size_t outSize)
-{
-  if (!json || !key || !out || outSize == 0)
-    return false;
-
-  out[0] = '\0';
-
-  char needle[24];
-  snprintf(needle, sizeof(needle), "\"%s\"", key);
-
-  const char *keyPos = strstr(json, needle);
-  if (!keyPos)
-    return false;
-
-  const char *colon = strchr(keyPos + strlen(needle), ':');
-  if (!colon)
-    return false;
-
-  const char *p = colon + 1;
-  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
-    p++;
-
-  if (*p != '"')
-    return false;
-  p++;
-
-  const char *end = strchr(p, '"');
-  if (!end)
-    return false;
-
-  size_t len = (size_t)(end - p);
-  if (len >= outSize)
-    len = outSize - 1;
-
-  memcpy(out, p, len);
-  out[len] = '\0';
-  return true;
-}
-
-bool BridgeMesh::isLikelyJsonText(const uint8_t *buf, uint8_t len)
-{
-  if (!buf || len < 2)
-    return false;
-
-  uint8_t start = 0;
-  while (start < len && (buf[start] == ' ' || buf[start] == '\t' || buf[start] == '\r' || buf[start] == '\n'))
-    start++;
-
-  if (strstr((const char *)buf + start, "\"type\":\"") == nullptr)
-    return false;
-
-  int end = len - 1;
-  while (end >= 0 && (buf[end] == ' ' || buf[end] == '\t' || buf[end] == '\r' || buf[end] == '\n'))
-    end--;
-
-  return end >= 0 && buf[end] == '}';
 }

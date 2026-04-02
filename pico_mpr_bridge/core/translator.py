@@ -215,15 +215,18 @@ def translate_ble_payload(raw_bytes, source_id="unknown"):
 
 
 
+import struct
+import ubinascii
+
 def decode_lora_hex(hex_str):
     """Unpacks Hex strings from the Uno back into standard Mesh JSON dicts."""
     try:
         b = ubinascii.unhexlify(hex_str.strip())
         ptype = b[0]
         
-        # 0x00: JOIN REQ (< B 16s 16s I B)
+        # 0x00: JOIN REQ (<B16s16sIB)
         if ptype == 0x00 and len(b) == 38:
-            u = struct.unpack('<B 16s 16s I B', b)
+            u = struct.unpack('<B16s16sIB', b)
             return {
                 "kind": "control", "type": "join_req",
                 "node_id": u[1].decode('utf-8').strip('\x00'),
@@ -231,9 +234,9 @@ def decode_lora_hex(hex_str):
                 "auth": f"{u[3]:08x}", "seq": u[4]
             }
             
-        # 0x02: HELLO (< B 16s 16s 8s B)
+        # 0x02: HELLO (<B16s16s8sB)
         elif ptype == 0x02 and len(b) == 42:
-            u = struct.unpack('<B 16s 16s 8s B', b)
+            u = struct.unpack('<B16s16s8sB', b)
             return {
                 "kind": "control", "type": "hello",
                 "node_id": u[1].decode('utf-8').strip('\x00'),
@@ -242,9 +245,9 @@ def decode_lora_hex(hex_str):
                 "seq": u[4]
             }
             
-        # 0x04: TELEMETRY (< B 16s 16s 16s 8s h H)
+        # 0x04: TELEMETRY (<B16s16s16s8shH)
         elif ptype == 0x04 and len(b) == 61:
-            u = struct.unpack('<B 16s 16s 16s 8s h H', b)
+            u = struct.unpack('<B16s16s16s8shH', b)
             return {
                 "kind": "data", "type": "sensor_data",
                 "node_id": u[1].decode('utf-8').strip('\x00'),
@@ -254,18 +257,18 @@ def decode_lora_hex(hex_str):
                 "payload": {"temp": u[5]/10.0, "hum": u[6]/10.0}
             }
 
-        # --- NEW: 0x05 ROUTE QUERY (< B 16s 16s) ---
+        # 0x05: ROUTE QUERY (<B16s16s)
         elif ptype == 0x05 and len(b) == 33:
-            u = struct.unpack('<B 16s 16s', b)
+            u = struct.unpack('<B16s16s', b)
             return {
                 "kind": "control", "type": "route_query",
                 "src": u[1].decode('utf-8').strip('\x00'),
                 "dst": u[2].decode('utf-8').strip('\x00')
             }
 
-        # --- NEW: 0x06 ROUTE RESP (< B 16s 16s 16s 12s H B) ---
+        # 0x06: ROUTE RESP (<B16s16s16s12sHB)
         elif ptype == 0x06 and len(b) == 64:
-            u = struct.unpack('<B 16s 16s 16s 12s H B', b)
+            u = struct.unpack('<B16s16s16s12sHB', b)
             return {
                 "kind": "control", "type": "route_resp",
                 "req_src": u[1].decode('utf-8').strip('\x00'),
@@ -277,38 +280,38 @@ def decode_lora_hex(hex_str):
             }
 
     except Exception as e:
-        pass
+        print("Hex Decode Error:", e) # Don't silently swallow errors!
     return None
 
 def encode_lora_hex(pkt):
     """Packs JSON Mesh dicts into binary Hex Strings for the Uno to transmit."""
     ptype = pkt.get("type")
     try:
-        # 0x01: JOIN ACK (< B 16s B 16s 8s)
+        # 0x01: JOIN ACK (<B16sB16s8s)
         if ptype == "join_ack":
             tid = pkt.get("target_id", "").encode('utf-8')[:15]
             acc = 1 if pkt.get("accepted") else 0
             bid = pkt.get("bridge_id", "").encode('utf-8')[:15]
             tok_hex = pkt.get("token", "")
             tok_bytes = ubinascii.unhexlify(tok_hex) if tok_hex else b'\x00'*8
-            b = struct.pack('<B 16s B 16s 8s', 0x01, tid, acc, bid, tok_bytes)
+            b = struct.pack('<B16sB16s8s', 0x01, tid, acc, bid, tok_bytes)
             return ubinascii.hexlify(b).decode('utf-8')
             
-        # 0x03: HELLO ACK (< B 16s 16s)
+        # 0x03: HELLO ACK (<B16s16s)
         elif ptype == "hello_ack":
             tid = pkt.get("target_id", "").encode('utf-8')[:15]
             bid = pkt.get("bridge_id", "").encode('utf-8')[:15]
-            b = struct.pack('<B 16s 16s', 0x03, tid, bid)
+            b = struct.pack('<B16s16s', 0x03, tid, bid)
             return ubinascii.hexlify(b).decode('utf-8')
 
-        # --- NEW: 0x05 ROUTE QUERY (< B 16s 16s) ---
+        # 0x05: ROUTE QUERY (<B16s16s)
         elif ptype == "route_query":
             src = pkt.get("src", "").encode('utf-8')[:15]
             dst = pkt.get("dst", "").encode('utf-8')[:15]
-            b = struct.pack('<B 16s 16s', 0x05, src, dst)
+            b = struct.pack('<B16s16s', 0x05, src, dst)
             return ubinascii.hexlify(b).decode('utf-8')
 
-        # --- NEW: 0x06 ROUTE RESP (< B 16s 16s 16s 12s H B) ---
+        # 0x06: ROUTE RESP (<B16s16s16s12sHB)
         elif ptype == "route_resp":
             req_src = pkt.get("req_src", "").encode('utf-8')[:15]
             dst = pkt.get("dst", "").encode('utf-8')[:15]
@@ -320,7 +323,7 @@ def encode_lora_hex(pkt):
             cost = int(pkt.get("cost", 999))
             status = 1 if pkt.get("status") == "ok" else 0
             
-            b = struct.pack('<B 16s 16s 16s 12s H B', 0x06, req_src, dst, nhop, proto_bytes, cost, status)
+            b = struct.pack('<B16s16s16s12sHB', 0x06, req_src, dst, nhop, proto_bytes, cost, status)
             return ubinascii.hexlify(b).decode('utf-8')
 
     except Exception as e:

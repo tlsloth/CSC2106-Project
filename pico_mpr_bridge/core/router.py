@@ -79,11 +79,13 @@ def build_graph(neighbour_table, self_id=None):
             graph[nid][self_id] = final_cost
 
     # 2. Edges between remote neighbours (from merged topology)
+
     for nid, entry in all_entries.items():
         via = entry.get("via")
         if via and via in graph:
-            nbr_protos = entry.get("protocols", [])
-            via_protos = all_entries.get(via, {}).get("protocols", [])
+            nbr_protos = entry.get("capabilities", []) 
+            via_protos = all_entries.get(via, {}).get("capabilities", []) 
+            
             rssi = entry.get("rssi", 0)
             
             # NEW MATH: Calculate link cost

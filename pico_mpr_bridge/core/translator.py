@@ -234,7 +234,7 @@ def decode_lora_hex(hex_str):
                 "auth": f"{u[3]:08x}", "seq": u[4]
             }
             
-        # 0x02: HELLO (<B16s16s8sB)
+        # 0x02: SENSOR HELLO (<B16s16s8sB)
         elif ptype == 0x02 and len(b) == 42:
             u = struct.unpack('<B16s16s8sB', b)
             return {
@@ -277,6 +277,18 @@ def decode_lora_hex(hex_str):
                 "via_protocol": u[4].decode('utf-8').strip('\x00'),
                 "cost": u[5],
                 "status": "ok" if u[6] == 1 else "no_route"
+            }
+
+        # 0x07: BRIDGE HELLO (<B16s8s32sI)
+        elif ptype == 0x07 and len(b) == 61:
+            u = struct.unpack('<B16s8s32sI', b)
+            caps_str = u[3].decode('utf-8').strip('\x00')
+            return {
+                "kind": "control", "type": "hello",
+                "node_id": u[1].decode('utf-8').strip('\x00'),
+                "role": u[2].decode('utf-8').strip('\x00'),
+                "capabilities": [c for c in caps_str.split(',') if c],
+                "timestamp": u[4]
             }
 
     except Exception as e:
@@ -325,7 +337,21 @@ def encode_lora_hex(pkt):
             
             b = struct.pack('<B16s16s16s12sHB', 0x06, req_src, dst, nhop, proto_bytes, cost, status)
             return ubinascii.hexlify(b).decode('utf-8')
+        
+        # 0x07: BRIDGE HELLO (<B16s8s32sI)
+        elif ptype == "hello":
+            nid = pkt.get("node_id", "").encode('utf-8')[:15]
+            role = pkt.get("role", "bridge").encode('utf-8')[:7]
+            
+            # Convert capabilities list to comma-separated string (e.g. "LoRa,WiFi-Direct")
+            caps_list = pkt.get("capabilities", [])
+            caps_str = ",".join(caps_list) if isinstance(caps_list, list) else str(caps_list)
+            caps_bytes = caps_str.encode('utf-8')[:31]
+            
+            ts = int(pkt.get("timestamp", 0))
+            
+            b = struct.pack('<B16s8s32sI', 0x07, nid, role, caps_bytes, ts)
+            return ubinascii.hexlify(b).decode('utf-8')
 
     except Exception as e:
         print("Hex Encode Error:", e)
-    return None

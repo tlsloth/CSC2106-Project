@@ -19,8 +19,7 @@ BridgeMesh::BridgeMesh(RH_RF95 &radio, const BridgeMeshConfig &config)
       _txHoldUntil(0)
 {
   memset(_token, 0, sizeof(_token));
-  strncpy(_bridgeId, "bridge_01", sizeof(_bridgeId) - 1);
-  _bridgeId[sizeof(_bridgeId) - 1] = '\0';
+  memset(_bridgeId, 0, sizeof(_bridgeId));
 }
 
 uint32_t BridgeMesh::fnv1a32(const char *str)
@@ -170,6 +169,7 @@ void BridgeMesh::tick()
     {
       _joined = false;
       memset(_token, 0, sizeof(_token));
+      memset(_bridgeId, 0, sizeof(_bridgeId));
       _lastJoinTime = 0;
       _missedHelloAcks = 0;
     }
@@ -222,6 +222,10 @@ void BridgeMesh::handleControlMessage(const uint8_t *incoming, uint8_t len)
     if (strcmp(ack->target_id, _config.nodeId) != 0)
       return;
 
+    if(_joined){
+      return;
+    }
+
     if (ack->accepted)
     {
       strncpy(_bridgeId, ack->bridge_id, 15);
@@ -239,6 +243,7 @@ void BridgeMesh::handleControlMessage(const uint8_t *incoming, uint8_t len)
     {
       _joined = false;
       memset(_token, 0, sizeof(_token));
+      memset(_bridgeId, 0, sizeof(_bridgeId));
       _awaitingHelloAck = false;
       _helloAckDeadline = 0;
       _txHoldUntil = 0;

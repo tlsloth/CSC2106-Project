@@ -258,14 +258,6 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                 _send_join_ack(msg, ok, egress_queue, reason, token)
                                 continue
 
-                            token_ok, token_reason = check_node_token(
-                                msg,
-                                _node_tokens.get(msg_node_id),
-                                getattr(config, "MESH_JOIN_KEY", ""),
-                            )
-                            if not token_ok:
-                                logger.warn(TAG, "Dropped {} from {} ({})".format(msg_type, msg_node_id, token_reason))
-                                continue
 
                             neighbour_table.update(
                                 msg_node_id,

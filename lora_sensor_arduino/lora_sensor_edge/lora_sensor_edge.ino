@@ -21,7 +21,7 @@ BridgeMeshConfig meshConfig = {
     "dashboard_main", // targetDst
     10000UL,          // joinInterval
     15000UL,          // helloInterval
-    3000UL            // helloAckTimeout
+    10000UL            // helloAckTimeout
 };
 
 BridgeMesh mesh(rf95, meshConfig);

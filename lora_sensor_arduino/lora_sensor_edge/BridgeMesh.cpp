@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 static const unsigned long HELLO_RX_GUARD_MS = 2000UL;
-static const unsigned long HELLO_RETRY_AFTER_MISS_MS = 1200UL;
+static const unsigned long HELLO_RETRY_AFTER_MISS_MS = 15000UL;
 static const uint8_t HELLO_ACK_MISS_THRESHOLD = 3;
 
 BridgeMesh::BridgeMesh(RH_RF95 &radio, const BridgeMeshConfig &config)

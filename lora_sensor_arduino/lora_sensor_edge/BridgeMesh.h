@@ -18,45 +18,20 @@ struct BridgeMeshConfig
 
 // --- THE NEW BINARY PACKET STRUCTS ---
 #pragma pack(push, 1)
-struct LoRaJoinReq
-{
-  uint8_t type = 0x00;
-  char node_id[16];
-  char network[16];
-  uint32_t auth;
-  uint8_t seq;
+struct LoRaJoinReq { 
+  uint8_t type; char node_id[16]; char network[16]; uint32_t auth; uint8_t seq; 
 };
-struct LoRaJoinAck
-{
-  uint8_t type = 0x01;
-  char target_id[16];
-  uint8_t accepted;
-  char bridge_id[16];
-  uint8_t token[8];
+struct LoRaJoinAck { 
+  uint8_t type; char target_id[16]; uint8_t accepted; char bridge_id[16]; uint8_t token[8]; 
 };
-struct LoRaHello
-{
-  uint8_t type = 0x02;
-  char node_id[16];
-  char network[16];
-  uint8_t token[8];
-  uint8_t seq;
+struct LoRaHello { 
+  uint8_t type; char node_id[16]; char network[16]; uint8_t token[8]; uint8_t seq; 
 };
-struct LoRaHelloAck
-{
-  uint8_t type = 0x03;
-  char target_id[16];
-  char bridge_id[16];
+struct LoRaHelloAck { 
+  uint8_t type; char target_id[16]; char bridge_id[16]; 
 };
-struct LoRaTelemetry
-{
-  uint8_t type = 0x04;
-  char node_id[16];
-  char hop_dst[16];
-  char dst[16];
-  uint8_t token[8];
-  int16_t temp;
-  uint16_t hum;
+struct LoRaTelemetry { 
+  uint8_t type; char node_id[16]; char hop_dst[16]; char dst[16]; uint8_t token[8]; int16_t temp; uint16_t hum; 
 };
 #pragma pack(pop)
 

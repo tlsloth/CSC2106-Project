@@ -14,18 +14,13 @@
 SoftwareSerial picoSerial(4,5);
 #define BRIDGE_UART picoSerial
 
-#pragma once
-
-// A 255-byte LoRa payload requires 510 hex characters + prefixes
-#define UART_LINE_MAX 550
+// A 255-byte LoRa payload requires 510 hex characters + "LORA_TX|" prefix
+#define UART_LINE_MAX 520
 
 RH_RF95 rf95(RFM95_CS, RFM95_INT);
 
 char uartLine[UART_LINE_MAX];
 uint16_t uartLineLen = 0;
-unsigned long loraRxCount = 0;
-unsigned long loraTxCount = 0;
-unsigned long uartOverflowCount = 0;
 
 bool startsWith(const char *text, const char *prefix)
 {
@@ -80,12 +75,12 @@ void sendHexLoRaPayload(const char *hexPayload)
 // If it timed out, OR if it claimed to finish in under 5 milliseconds (physically impossible)
   if (!txOk || txDuration < 5)
   {
-    BRIDGE_UART.println("LORA_ERR|TX_FAILED_OR_FAKE_SUCCESS");
-    forceRebootRadio("TX_FAULT");
+    BRIDGE_UART.println(F("LORA_ERR|TX_FAILED_OR_FAKE_SUCCESS"));
+    forceRebootRadio(F("TX_FAULT"));
   }
   else 
   {
-    BRIDGE_UART.println("LORA_STATUS|TX_DONE");
+    BRIDGE_UART.println(F("LORA_STATUS|TX_DONE"));
   }
   
   delay(5);
@@ -126,7 +121,6 @@ void pollPicoUart()
     }
     else
     {
-      uartOverflowCount++;
       uartLineLen = 0;
     }
   }
@@ -135,17 +129,15 @@ void pollPicoUart()
 //==================== RX: UNO -> PICO (Binary LoRa -> Hex String) ====================//
 void forwardRawFrameToPico(uint8_t *buf, uint8_t len, int16_t rssi)
 {
-  loraRxCount++;
-
-  BRIDGE_UART.print("LORA_RX|");
+  BRIDGE_UART.print(F("LORA_RX|"));
   BRIDGE_UART.print(rssi);
-  BRIDGE_UART.print("|0|");
+  BRIDGE_UART.print(F("|0|"));
 
   // Safely translate raw bytes into a Hex string so it doesn't break UART newlines
   for (int i = 0; i < len; i++)
   {
     if (buf[i] < 16)
-      BRIDGE_UART.print("0"); // Add leading zero
+      BRIDGE_UART.print('0'); // Add leading zero
     BRIDGE_UART.print(buf[i], HEX);
   }
   BRIDGE_UART.println();
@@ -172,8 +164,8 @@ unsigned long lastForceReboot = 0;
 const unsigned long FORCE_REBOOT_INTERVAL = 300000UL; // 5 minutes in milliseconds
 
 // A clean helper function so we don't repeat the reset code 3 times!
-void forceRebootRadio(const char* reason) {
-  BRIDGE_UART.print("LORA_STATUS|REBOOTING|");
+void forceRebootRadio(const __FlashStringHelper* reason) {
+  BRIDGE_UART.print(F("LORA_STATUS|REBOOTING|"));
   BRIDGE_UART.println(reason);
   
   // Hard-reset the silicon with generous timing for cheap modules
@@ -188,13 +180,13 @@ void forceRebootRadio(const char* reason) {
       rf95.setFrequency(RF95_FREQ);
       rf95.setTxPower(2, false); // 2dBm for desk testing
       rf95.setModeRx();
-      BRIDGE_UART.println("LORA_STATUS|RADIO_RECOVERED");
+      BRIDGE_UART.println(F("LORA_STATUS|RADIO_RECOVERED"));
       return;
     }
     // Backoff before retry: 50ms, 100ms, 200ms
     delay(50 << attempt);
   }
-  BRIDGE_UART.println("LORA_ERR|RADIO_INIT_FAILED");
+  BRIDGE_UART.println(F("LORA_ERR|RADIO_INIT_FAILED"));
 }
 
 void checkRadioHealth() {
@@ -204,7 +196,7 @@ void checkRadioHealth() {
   if (now - lastForceReboot >= FORCE_REBOOT_INTERVAL) {
     lastForceReboot = now;
     lastHealthCheck = now; // Sync the timers
-    forceRebootRadio("PERIODIC_PREVENTATIVE");
+    forceRebootRadio(F("PERIODIC_PREVENTATIVE"));
     return;
   }
 
@@ -223,7 +215,7 @@ void checkRadioHealth() {
     // If the chip returns 0x00 or 0xFF, the SPI bus or the silicon is dead!
     if (version == 0x00 || version == 0xFF) {
       lastForceReboot = now; // Reset the 5-min timer so we don't double-reboot
-      forceRebootRadio("ZOMBIE_RADIO_DETECTED");
+      forceRebootRadio(F("ZOMBIE_RADIO_DETECTED"));
     }
   }
 }
@@ -243,10 +235,10 @@ void setup()
 
   if (!rf95.init())
   {
-    BRIDGE_UART.println("LORA_ERR|BOOT_INIT_FAILED");
+    BRIDGE_UART.println(F("LORA_ERR|BOOT_INIT_FAILED"));
     // Retry instead of hard-locking
     delay(500);
-    forceRebootRadio("BOOT_RETRY");
+    forceRebootRadio(F("BOOT_RETRY"));
   }
   if (!rf95.setFrequency(RF95_FREQ))
     while (1)

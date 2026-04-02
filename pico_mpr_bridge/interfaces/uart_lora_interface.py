@@ -329,7 +329,7 @@ async def tx_task(egress_queue):
                             logger.debug(TAG,"Uno confirmed TX completion")
                         except asyncio.TimeoutError:
                             logger.warn(TAG, "Timeout waiting for Uno TX_DONE confirmation. Releasing lock...")
-                        await asyncio.sleep_ms(200)  # Short delay to allow Uno to process before next command
+                        await asyncio.sleep_ms(20)
         except Exception as e:
             logger.error(TAG, "TX error: {}".format(e))
 

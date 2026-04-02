@@ -105,6 +105,7 @@ def main():
         _seen_responses = {}    # (req_src, dst, seq) -> timestamp — dedup responses
         _query_seq = [0]        # mutable counter for outgoing query sequence numbers
         _prune_counter = [0]
+        _last_pending_check = [0]
 
         def _next_query_seq():
             _query_seq[0] = (_query_seq[0] + 1) % 65536
@@ -146,14 +147,14 @@ def main():
                 wifi_direct_egress.push(1, dict(pkt))
 
         while True:
+            processed = 0
             try:
-                if not ingress_queue.is_empty():
+                while processed < 10 and not ingress_queue.is_empty():
                     pkt = ingress_queue.pop()
-
                     if pkt is None:
-                        await asyncio.sleep_ms(50)
-                        continue
+                        break
 
+                    processed += 1
                     _prune_seen_caches()
                     pkt_type = pkt.get("type")
 
@@ -342,10 +343,11 @@ def main():
 
             # ===================================================
             # Periodic retry: re-query for unresolved pending routes
-            # Runs every loop iteration but throttled by last_query_time
+            # Check every 2s to reduce CPU overhead
             # ===================================================
-            if pending_routes:
+            if pending_routes and (time.time() - _last_pending_check[0] >= 2):
                 now = time.time()
+                _last_pending_check[0] = now
                 for pending_dst in list(pending_routes.keys()):
                     # Check if a route was discovered since we last checked
                     route = routing_table.lookup(pending_dst)
@@ -379,7 +381,7 @@ def main():
                         pending_routes[pending_dst] = pending_routes[pending_dst][-10:]
                         logger.warn(TAG, "Dropped {} oldest held packets for {}".format(dropped, pending_dst))
 
-            await asyncio.sleep_ms(50)
+            await asyncio.sleep_ms(5 if processed > 0 else 50)
 
     async def route_maintenance_task():
         """Periodically prune dead neighbours and recompute routes."""

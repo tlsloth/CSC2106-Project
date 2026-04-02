@@ -95,22 +95,26 @@ async def tx_task(egress_queue):
     
     while True:
         try:
-            if is_available() and not egress_queue.is_empty():
-                pkt = egress_queue.pop()
-                if pkt:
+            if is_available():
+                # Batch drain up to 5 packets per wake
+                for _ in range(5):
+                    if egress_queue.is_empty():
+                        break
+                    pkt = egress_queue.pop()
+                    if not pkt:
+                        break
                     payload_str = json.dumps(pkt)
-                    
                     async with _udp_lock:
                         try:
                             _sock_tx.sendto(payload_str.encode('utf-8'), (BROADCAST_IP, UDP_PORT))
                             logger.debug(TAG, f"Broadcasted {pkt.get('type', 'data')} to UDP mesh")
                         except Exception as e:
                             logger.error(TAG, f"UDP sendto error: {e}")
-                            
+
         except Exception as e:
             logger.error(TAG, f"TX task error: {e}")
 
-        await asyncio.sleep_ms(100)
+        await asyncio.sleep_ms(20)
 
 async def rx_task(ingress_queue, neighbour_table):
     """Async task: listen for UDP broadcasts and route them."""
@@ -119,29 +123,26 @@ async def rx_task(ingress_queue, neighbour_table):
     while True:
         try:
             if is_available():
-                data = None
-                addr = None
-                
-                try:
-                    # Notice no lock needed here anymore! 
-                    # We are reading from _sock_rx while TX uses _sock_tx
-                    data, addr = _sock_rx.recvfrom(2048)
-                except OSError:
-                    pass 
-
-                if data:
-                    msg_str = data.decode('utf-8')
+                # Drain up to 10 datagrams per wake to prevent socket buffer overflow
+                for _ in range(10):
                     try:
-                        msg_obj = json.loads(msg_str)
-                    except ValueError:
-                        continue 
+                        data, addr = _sock_rx.recvfrom(2048)
+                    except OSError:
+                        break  # No more data available
+
+                    if not data:
+                        break
+
+                    try:
+                        msg_obj = json.loads(data.decode('utf-8'))
+                    except (ValueError, UnicodeError):
+                        continue
 
                     msg_type = str(msg_obj.get("type") or "")
                     msg_src = str(msg_obj.get("node_id") or msg_obj.get("src") or "unknown")
 
                     if msg_src == config.NODE_ID:
-                        continue 
-
+                        continue
 
                     if msg_type == "hello":
                         neighbour_table.update(
@@ -150,7 +151,6 @@ async def rx_task(ingress_queue, neighbour_table):
                             capabilities=msg_obj.get("capabilities", ["WiFi-Direct"])
                         )
                         continue
-
 
                     if msg_type == "topology":
                         remote_id = msg_obj.get("node_id")
@@ -172,7 +172,7 @@ async def rx_task(ingress_queue, neighbour_table):
         except Exception as e:
             logger.error(TAG, f"RX task error: {e}")
 
-        await asyncio.sleep_ms(200)
+        await asyncio.sleep_ms(20)
 
 async def hello_task(neighbour_table):
     """Async task: periodically broadcast presence and topology."""

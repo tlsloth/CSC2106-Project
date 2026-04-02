@@ -274,7 +274,9 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                     continue
                                 
                                 if msg_type == "hello":
-                                    _send_hello_ack(msg, egress_queue)
+                                    role = msg.get("role", "")
+                                    if role != "bridge":
+                                        _send_hello_ack(msg, egress_queue)
                                 if msg_type in ("hello", "hello_ack", "join_ack"):
                                     continue
 
@@ -333,8 +335,12 @@ async def tx_task(egress_queue):
 
 async def hello_task(neighbour_table, egress_queue):
     import uasyncio as asyncio
+    import random
 
     logger.info(TAG, "LoRa-over-UART Hello task started")
+    # Random initial delay to desync bridges that boot simultaneously
+    await asyncio.sleep_ms(random.randint(1000, 5000))
+
     while True:
         try:
             if _uart is not None:
@@ -346,4 +352,7 @@ async def hello_task(neighbour_table, egress_queue):
         except Exception as e:
             logger.error(TAG, "Hello broadcast error: {}".format(e))
 
-        await asyncio.sleep(getattr(config, "HELLO_INTERVAL", 30))
+        # Add +/- 3s jitter to avoid synchronized TX collisions between bridges
+        base = getattr(config, "HELLO_INTERVAL", 30)
+        jitter = random.randint(-3000, 3000)
+        await asyncio.sleep_ms(base * 1000 + jitter)

@@ -1,7 +1,7 @@
 # config.py — All tuneable parameters for the MPR Bridge
 
 # Node identity
-NODE_ID         = "bridge_A"
+NODE_ID         = "bridge_B"
 NODE_ROLE       = "bridge"          # "bridge" | "sensor" | "dashboard"
 CAPABILITIES    = ["LoRa", "WiFi-Direct"] 
 
@@ -12,7 +12,7 @@ WIFI_CONNECT_ATTEMPTS = 3          # Retry association attempts before failing s
 WIFI_CONNECT_TIMEOUT_S = 20         # Per-attempt connect timeout in seconds
 
 # MQTT broker
-MQTT_BROKER     = "10.196.168.251"
+MQTT_BROKER     = "192.168.137.1"
 MQTT_PORT       = 1883
 MQTT_USER       = ""
 MQTT_PASSWORD   = ""

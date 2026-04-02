@@ -276,6 +276,7 @@ def main():
                     # ==============================================
                     dst = pkt.get("dst")
                     src = pkt.get("src") or pkt.get("node_id") or "unknown"
+                    pkt["src"] = src  # Normalize: ensure src is always set for downstream encoders
                     hop_dst = pkt.get("hop_dst")
 
                     if not dst:

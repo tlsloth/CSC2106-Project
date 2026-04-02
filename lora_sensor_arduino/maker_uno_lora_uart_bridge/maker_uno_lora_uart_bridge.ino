@@ -169,28 +169,32 @@ void pollLoraRx()
 // --- SILICON HEALTH & WATCHDOG CHECK ---
 unsigned long lastHealthCheck = 0;
 unsigned long lastForceReboot = 0;
-const unsigned long FORCE_REBOOT_INTERVAL = 60000UL; // 1 minutes in milliseconds
+const unsigned long FORCE_REBOOT_INTERVAL = 300000UL; // 5 minutes in milliseconds
 
 // A clean helper function so we don't repeat the reset code 3 times!
 void forceRebootRadio(const char* reason) {
-  BRIDGE_UART.print("LORA_STATUS|REBOOTING|");x1
+  BRIDGE_UART.print("LORA_STATUS|REBOOTING|");
   BRIDGE_UART.println(reason);
   
-  // Hard-reset the silicon
+  // Hard-reset the silicon with generous timing for cheap modules
   digitalWrite(RFM95_RST, LOW);
-  delay(10);
+  delay(15);
   digitalWrite(RFM95_RST, HIGH);
-  delay(10);
+  delay(50);  // SX1276 needs time to stabilize oscillator after reset
   
-  // Reinitialize
-  if (rf95.init()) {
-    rf95.setFrequency(RF95_FREQ);
-    rf95.setTxPower(2, false); // 2dBm for desk testing
-    rf95.setModeRx();
-    BRIDGE_UART.println("LORA_STATUS|RADIO_RECOVERED");
-  } else {
-    BRIDGE_UART.println("LORA_ERR|RADIO_INIT_FAILED");
+  // Retry init up to 3 times with increasing backoff
+  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+    if (rf95.init()) {
+      rf95.setFrequency(RF95_FREQ);
+      rf95.setTxPower(2, false); // 2dBm for desk testing
+      rf95.setModeRx();
+      BRIDGE_UART.println("LORA_STATUS|RADIO_RECOVERED");
+      return;
+    }
+    // Backoff before retry: 50ms, 100ms, 200ms
+    delay(50 << attempt);
   }
+  BRIDGE_UART.println("LORA_ERR|RADIO_INIT_FAILED");
 }
 
 void checkRadioHealth() {
@@ -233,13 +237,17 @@ void setup()
   digitalWrite(RFM95_RST, HIGH);
   delay(10);
   digitalWrite(RFM95_RST, LOW);
-  delay(10);
+  delay(15);
   digitalWrite(RFM95_RST, HIGH);
-  delay(10);
+  delay(50);
 
   if (!rf95.init())
-    while (1)
-      ;
+  {
+    BRIDGE_UART.println("LORA_ERR|BOOT_INIT_FAILED");
+    // Retry instead of hard-locking
+    delay(500);
+    forceRebootRadio("BOOT_RETRY");
+  }
   if (!rf95.setFrequency(RF95_FREQ))
     while (1)
       ;

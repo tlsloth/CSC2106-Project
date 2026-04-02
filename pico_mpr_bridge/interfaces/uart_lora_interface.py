@@ -258,7 +258,16 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                 _send_join_ack(msg, ok, egress_queue, reason, token)
                                 continue
 
+                            if msg_kind == "control":
+                                # Delegate route control to main.py (centralized AODV)
+                                # Skip neighbour update — these packets don't carry
+                                # a proper node_id/src identity of the transmitter
+                                if msg_type in ("route_query", "route_resp"):
+                                    msg["_rx_protocol"] = "LoRa"
+                                    ingress_queue.push(1, msg)
+                                    continue
 
+                            # Update neighbour table for all other packet types
                             neighbour_table.update(
                                 msg_node_id,
                                 protocols=["LoRa"],
@@ -267,12 +276,6 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                             )
                             
                             if msg_kind == "control":
-                                # Delegate route control to main.py (centralized AODV)
-                                if msg_type in ("route_query", "route_resp"):
-                                    msg["_rx_protocol"] = "LoRa"
-                                    ingress_queue.push(1, msg)
-                                    continue
-                                
                                 if msg_type == "hello":
                                     role = msg.get("role", "")
                                     if role != "bridge":

@@ -405,7 +405,7 @@ def encode_lora_hex(pkt):
         # Header: ptype(1) + src(16) + dst(16) + hop_src(16) + hop_dst(16) + ttl(1) + priority(1) + seq(2) = 69 bytes
         # Payload: remaining bytes as JSON (max ~182 bytes to stay within 251-byte LoRa limit)
         else:
-            src = pkt.get("src", "").encode('utf-8')[:15]
+            src = (pkt.get("src") or pkt.get("node_id") or "").encode('utf-8')[:15]
             dst = pkt.get("dst", "").encode('utf-8')[:15]
             hop_src = pkt.get("hop_src", "").encode('utf-8')[:15]
             hop_dst = pkt.get("hop_dst", "").encode('utf-8')[:15]

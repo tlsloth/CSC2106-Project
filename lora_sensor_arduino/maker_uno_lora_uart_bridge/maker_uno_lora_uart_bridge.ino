@@ -208,10 +208,12 @@ void checkRadioHealth() {
     lastHealthCheck = now;
     
     // Manually bypass RadioHead and read the SX1276 hardware version register (0x42)
+    SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
     digitalWrite(RFM95_CS, LOW);
     SPI.transfer(0x42 & 0x7F); 
     uint8_t version = SPI.transfer(0);
     digitalWrite(RFM95_CS, HIGH);
+    SPI.endTransaction();
 
     // If the chip returns 0x00 or 0xFF, the SPI bus or the silicon is dead!
     if (version == 0x00 || version == 0xFF) {

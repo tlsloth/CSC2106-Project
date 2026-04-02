@@ -237,7 +237,8 @@ void BridgeMesh::handleControlMessage(const uint8_t *incoming, uint8_t len)
       _txHoldUntil = 0;
       _missedHelloAcks = 0;
       _lastHelloTime = millis();
-      Serial.println("RX| Join Accepted!");
+      Serial.print("RX| Join Accepted: Bridge:");
+      Serial.println(_bridgeId);
     }
     else
     {

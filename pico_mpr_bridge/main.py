@@ -283,13 +283,22 @@ def main():
                     if not dst:
                         logger.warn(TAG, "Packet from {} has no destination, dropping.".format(src))
                         continue
+
+                    # Hop-addressed filtering: if the packet has a hop_dst that
+                    # isn't us, only relay it if we have a route to the final dst
+                    # (opportunistic relay for overheard sensor broadcasts)
                     if (
                         src != config.NODE_ID
                         and hop_dst
                         and hop_dst != config.NODE_ID
                         ):
-                        logger.debug(TAG, "Packet not addressed to us, dropping.")
-                        continue
+                        relay_route = routing_table.lookup(dst)
+                        if not relay_route:
+                            logger.debug(TAG, "Packet not addressed to us (hop_dst={}), dropping.".format(hop_dst))
+                            continue
+                        logger.info(TAG, "Opportunistic relay: overheard pkt for {} (hop_dst was {})".format(dst, hop_dst))
+                        # Fall through to normal routing — hop_dst will be
+                        # updated below when the route is applied
 
                     if pkt.get("src") != config.NODE_ID:
                         pkt = packet.decrement_ttl(pkt)

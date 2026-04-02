@@ -244,6 +244,16 @@ def decode_lora_hex(hex_str):
                 "token": ubinascii.hexlify(u[3]).decode('utf-8'),
                 "seq": u[4]
             }
+
+        # 0x03: HELLO ACK (<B16s16s)
+        elif ptype == 0x03 and len(b) == 33:
+            u = struct.unpack('<B16s16s', b)
+            return {
+                "kind": "control", 
+                "type": "hello_ack",
+                "target_id": u[1].decode('utf-8').strip('\x00'),
+                "src": u[2].decode('utf-8').strip('\x00') # Maps the answering bridge to 'src' so the neighbour table catches it!
+            }
             
         # 0x04: TELEMETRY (<B16s16s16s8shH)
         elif ptype == 0x04 and len(b) == 61:

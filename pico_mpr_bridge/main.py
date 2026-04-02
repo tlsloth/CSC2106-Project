@@ -339,6 +339,45 @@ def main():
             except Exception as e:
                 logger.error(TAG, "Translator error: {}".format(e))
 
+            # ===================================================
+            # Periodic retry: re-query for unresolved pending routes
+            # Runs every loop iteration but throttled by last_query_time
+            # ===================================================
+            if pending_routes:
+                now = time.time()
+                for pending_dst in list(pending_routes.keys()):
+                    # Check if a route was discovered since we last checked
+                    route = routing_table.lookup(pending_dst)
+                    if route:
+                        logger.info(TAG, "Route now available for {}, flushing {} held packets".format(
+                            pending_dst, len(pending_routes[pending_dst])))
+                        for held_pkt in pending_routes[pending_dst]:
+                            ingress_queue.push(10, held_pkt)
+                        del pending_routes[pending_dst]
+                        last_query_time.pop(pending_dst, None)
+                        continue
+
+                    # Re-query if cooldown has elapsed
+                    if pending_dst not in last_query_time or (now - last_query_time[pending_dst] > 15):
+                        query_pkt = {
+                            "type": "route_query",
+                            "kind": "control",
+                            "src": config.NODE_ID,
+                            "dst": pending_dst,
+                            "ttl": config.PACKET_TTL,
+                            "seq": _next_query_seq(),
+                        }
+                        _flood_all_interfaces(query_pkt)
+                        logger.info(TAG, "Retrying route_query for {} ({} packets held)".format(
+                            pending_dst, len(pending_routes[pending_dst])))
+                        last_query_time[pending_dst] = now
+
+                    # Cap held packets to prevent memory growth
+                    if len(pending_routes.get(pending_dst, [])) > 10:
+                        dropped = len(pending_routes[pending_dst]) - 10
+                        pending_routes[pending_dst] = pending_routes[pending_dst][-10:]
+                        logger.warn(TAG, "Dropped {} oldest held packets for {}".format(dropped, pending_dst))
+
             await asyncio.sleep_ms(50)
 
     async def route_maintenance_task():

@@ -246,17 +246,30 @@ async def hello_task(neighbour_table=None):
         if not _ble_active or not _MESH_SERVICE_UUID:
             await asyncio.sleep(1)
             continue
+            
         try:
+            # Advertise continuously. If someone connects, connection is yielded.
+            # If no one connects, this line blocks forever (which is what we want for a beacon!)
             async with await aioble.advertise(
                 250_000,
                 name=config.NODE_ID,
-                services=[_MESH_SERVICE_UUID],
-                timeout_ms=1000        # ← key: stop after 1s, DON'T hold connection
+                services=[_MESH_SERVICE_UUID]
             ) as connection:
-                pass                   # ← DON'T await connection.disconnected()
+                
+                logger.debug(TAG, "Central connected during advertising!")
+                
+                # We wait politely for the Central to finish writing its data
+                # and explicitly disconnect from us. 
+                await connection.disconnected()
+                
+                logger.debug(TAG, "Central disconnected, restarting advertisement.")
+                
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            logger.debug(TAG, "Adv: {}".format(e))
-        await asyncio.sleep_ms(50)
+            logger.debug(TAG, f"Adv Error: {type(e).__name__} - {e}")
+            
+        await asyncio.sleep_ms(100) # Tiny breather before restarting advertisement
 
 
 

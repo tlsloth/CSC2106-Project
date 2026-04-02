@@ -1,99 +1,239 @@
-from machine import Pin, time_pulse_us
-import utime
-import bluetooth
-from micropython import const
-import struct
+import json
 import uasyncio as asyncio
+import aioble
+import bluetooth
+import config
+from utils import logger
 
-# ─── Ultrasonic Config ───────────────────────────────────────────
-TRIG = Pin(0, Pin.OUT)
-ECHO = Pin(1, Pin.IN)
+TAG = "BLE_EDGE"
 
-def read_distance():
-    TRIG.value(0)
-    utime.sleep_us(5)
-    TRIG.value(1)
-    utime.sleep_us(10)
-    TRIG.value(0)
-    duration = time_pulse_us(ECHO, 1, 30000)
-    if duration < 0:
-        return None
-    return (duration * 0.0343) / 2
+# Standard Mesh UUIDs
+MESH_SERVICE_UUID = bluetooth.UUID(getattr(config, "BLE_MESH_SERVICE_UUID", 0x1111))
+MESH_RX_CHAR_UUID = bluetooth.UUID(getattr(config, "BLE_MESH_RX_CHAR_UUID", 0x2222))
 
-# ─── BLE Config ──────────────────────────────────────────────────
-_ADV_INTERVAL_MS        = const(100)
-_IRQ_CENTRAL_CONNECT    = const(1)
-_IRQ_CENTRAL_DISCONNECT = const(2)
-_IRQ_GATTS_WRITE        = const(3)
+_dynamic_gateway = None 
 
-_FLAG_READ   = const(0x0002)
-_FLAG_NOTIFY = const(0x0010)
+# State tracking
+_ble_active = False
+_is_joined = False
+_session_token = ""
+_seq_num = 0
+_fail_count = 0
+MAX_FAILS = 3
 
-_DIST_UUID = bluetooth.UUID(0xFFF0)
-_DIST_CHAR = (bluetooth.UUID(0xFFF1),
-              _FLAG_READ | _FLAG_NOTIFY,)
-_DIST_SVC  = (_DIST_UUID, (_DIST_CHAR,),)
+# The Sensor's Mailbox (For receiving ACKs from the bridge)
+_service = None
+_rx_char = None
 
-_DEVICE_NAME = "PicoUltrasonic"
-class BLEUltrasonicPeripheral:
-    def __init__(self, ble):
-        self._ble = ble
-        self._ble.active(True)
-        self._ble.irq(self._irq)
-        ((self._dist_handle,),) = self._ble.gatts_register_services((_DIST_SVC,))
-        self._connections = set()
-        self._advertise()
 
-    def _irq(self, event, data):
-        if event == _IRQ_CENTRAL_CONNECT:
-            conn_handle, _, _ = data
-            self._connections.add(conn_handle)
-            print("Connected handle:", conn_handle)
-        elif event == _IRQ_CENTRAL_DISCONNECT:
-            conn_handle, _, _ = data
-            self._connections.discard(conn_handle)
-            print("Disconnected, restarting advert...")
-            self._advertise()
-
-    def _advertise(self):
-        name_bytes = _DEVICE_NAME.encode()
-        svc_uuid_bytes = struct.pack("<H", 0xFFF0)
-        adv_data = (
-            bytes([0x02, 0x01, 0x06]) +
-            bytes([len(name_bytes) + 1, 0x09]) + name_bytes +
-            bytes([len(svc_uuid_bytes) + 1, 0x03]) + svc_uuid_bytes
+def init():
+    """Initialise the Sensor's BLE GATT Server to receive ACKs."""
+    global _ble_active, _service, _rx_char
+    try:
+        _service = aioble.Service(MESH_SERVICE_UUID)
+        
+        # write=True allows the bridge to drop ACKs here
+        _rx_char = aioble.Characteristic(
+            _service, 
+            MESH_RX_CHAR_UUID, 
+            write=True, 
+            capture=True
         )
-        self._ble.gap_advertise(_ADV_INTERVAL_MS * 1000, adv_data=adv_data)
-        print("Advertising as:", _DEVICE_NAME)
-
-    def update_distance(self, dist_cm):
-        val = struct.pack("<H", int(dist_cm))
-        self._ble.gatts_write(self._dist_handle, val)
-        for conn in self._connections:
-            self._ble.gatts_notify(conn, self._dist_handle)
-        print("Distance:", int(dist_cm), "cm -> BLE updated")
-
-    def update_out_of_range(self):
-        # 0xFFFF sentinel means ultrasonic measurement unavailable.
-        val = struct.pack("<H", 0xFFFF)
-        self._ble.gatts_write(self._dist_handle, val)
-        for conn in self._connections:
-            self._ble.gatts_notify(conn, self._dist_handle)
-        print("Distance: out of range -> BLE updated (0xFFFF)")
+        
+        aioble.register_services(_service)
+        _ble_active = True
+        logger.info(TAG, f"Edge BLE initialised.")
+        return True
+    except Exception as e:
+        logger.error(TAG, f"BLE init failed: {e}")
+        return False
 
 
-async def main():
-    ble = bluetooth.BLE()
-    peripheral = BLEUltrasonicPeripheral(ble)
-    print("Pico W BLE Ultrasonic peripheral running...")
+# ==========================================
+# 1. THE DELIVERY BOY (CENTRAL / TX)
+# ==========================================
+async def send_mesh_packet(pkt_dict):
+    """Scan for mesh bridges, pick the closest one, and hand off the packet."""
+    global _dynamic_gateway, _seq_num
 
+    if not _ble_active:
+        return False
+
+    pkt_dict["token"] = _session_token
+    pkt_dict["seq"] = _seq_num
+    _seq_num += 1
+
+    payload_str = json.dumps(pkt_dict)
+    found_bridges = []
+    
+    try:
+        logger.debug(TAG, f"Scanning for mesh networks to send {pkt_dict.get('type')}...")
+        
+        # 1. SCAN THE ROOM
+        async with aioble.scan(duration_ms=3000, interval_us=30000, window_us=30000, active=True) as scanner:
+            async for result in scanner:
+                services = list(result.services())
+                
+                # Filter for our specific Mesh Network UUID
+                if MESH_SERVICE_UUID not in services:
+                    continue 
+                
+                device_name = result.name()
+                if not device_name:
+                    device_name = f"bridge_{result.device.addr_hex()[-4:]}"
+                
+                # If we are already joined, ONLY talk to our dynamic gateway to save time.
+                if _is_joined and _dynamic_gateway and device_name != _dynamic_gateway:
+                    continue
+                    
+                # Save the bridge and its signal strength
+                found_bridges.append((result.rssi, device_name, result.device))
+
+        if not found_bridges:
+            logger.warn(TAG, "No mesh bridges found in range.")
+            return False
+
+        # 2. SORT BY SIGNAL STRENGTH (Strongest / Closest first)
+        found_bridges.sort(key=lambda x: x[0], reverse=True)
+
+        # 3. TRY TO CONNECT AND DELIVER
+        for rssi, device_name, device in found_bridges:
+            try:
+                logger.debug(TAG, f"Attempting delivery to {device_name} (RSSI: {rssi})")
+                connection = await device.connect(timeout_ms=2000)
+                service = await connection.service(MESH_SERVICE_UUID)
+                
+                if service:
+                    char = await service.characteristic(MESH_RX_CHAR_UUID)
+                    if char:
+                        await char.write(payload_str.encode('utf-8'))
+                        logger.info(TAG, f"Packet '{pkt_dict.get('type')}' delivered to {device_name}")
+                        await connection.disconnect()
+                        
+                        # IF THIS WAS A JOIN REQ, LOCK ONTO THIS BRIDGE!
+                        if pkt_dict.get("type") == "join_req":
+                            _dynamic_gateway = device_name
+                            logger.info(TAG, f"Locked onto dynamic gateway: {_dynamic_gateway}")
+                            
+                        return True # Success!
+                        
+                await connection.disconnect()
+            except Exception as e:
+                logger.warn(TAG, f"Failed to connect to {device_name}, trying next... ({e})")
+                
+    except Exception as e:
+        logger.error(TAG, f"BLE TX Scan Error: {e}")
+        
+    return False
+
+# ==========================================
+# 2. THE MAILBOX (PERIPHERAL / RX)
+# ==========================================
+async def rx_task():
+    """Listen for ACKs and commands dropped into our mailbox by the Bridge."""
+    global _is_joined, _session_token
+    logger.info(TAG, "BLE Mailbox task started")
+    
     while True:
-        d = read_distance()
-        if d is not None and d < 400:
-            peripheral.update_distance(d)
+        if not _ble_active:
+            await asyncio.sleep(1)
+            continue
+            
+        try:
+            conn, data = await _rx_char.written()
+            payload_str = data.decode('utf-8', 'ignore')
+            msg = json.loads(payload_str)
+            msg_type = msg.get("type", "")
+
+            if msg_type == "join_ack":
+                if msg.get("accepted"):
+                    _session_token = msg.get("token", "")
+                    _is_joined = True
+                    logger.info(TAG, f"SUCCESS! Joined network via {msg.get('bridge_id')}. Token secured.")
+                else:
+                    logger.warn(TAG, f"Join rejected: {msg.get('reason')}")
+            
+            elif msg_type == "command":
+                # Handle any dashboard commands routed to this sensor here
+                logger.info(TAG, f"Received command from dashboard: {msg}")
+
+        except Exception as e:
+            logger.error(TAG, f"BLE RX Error: {e}")
+
+
+# ==========================================
+# 3. THE LIFECYCLE ROUTINES
+# ==========================================
+def _handle_tx_result(success):
+    """Tracks consecutive failures and triggers a network rejoin if necessary."""
+    global _fail_count, _is_joined, _dynamic_gateway
+    
+    if success:
+        _fail_count = 0 # Reset counter on success
+    else:
+        _fail_count += 1
+        logger.warn(TAG, f"Transmission failed. Strike {_fail_count}/{MAX_FAILS}")
+        
+        if _fail_count >= MAX_FAILS:
+            logger.error(TAG, "Gateway lost! Purging session and initiating self-healing...")
+            _is_joined = False
+            _dynamic_gateway = None
+            _fail_count = 0
+
+async def join_network_task():
+    """Attempt to join the mesh until successful."""
+    global _is_joined
+    import core.security as sec
+    
+    while True: # Changed to run forever, so it can catch disconnects
+        if not _is_joined:
+            join_req = {
+                "kind": "control",
+                "type": "join_req",
+                "node_id": config.NODE_ID,
+                "network": getattr(config, "MESH_NETWORK_NAME", "DEFAULT_MESH"),
+                "auth": sec.generate_auth_hash(config.MESH_JOIN_KEY) 
+            }
+            
+            logger.info(TAG, "Broadcasting Join Request to find a gateway...")
+            await send_mesh_packet(join_req)
+            
+            # Wait 10 seconds for the Bridge to send the ACK before trying again
+            await asyncio.sleep(10)
         else:
-            peripheral.update_out_of_range()
-        await asyncio.sleep_ms(500)
+            # If joined, sleep and wait to see if we get disconnected
+            await asyncio.sleep(1)
 
+async def hello_task():
+    """Periodically send a Hello to keep our route alive in the Bridge."""
+    while True:
+        if _is_joined:
+            hello_pkt = {
+                "kind": "control",
+                "type": "hello",
+                "node_id": config.NODE_ID
+            }
+            success = await send_mesh_packet(hello_pkt)
+            _handle_tx_result(success) # Check if the gateway is still there!
+            
+        await asyncio.sleep(30)
 
-asyncio.run(main())
+async def telemetry_task(get_sensor_data_func):
+    """Periodically read sensor data and push it to the Bridge."""
+    while True:
+        if _is_joined:
+            sensor_data = get_sensor_data_func()
+            
+            data_pkt = {
+                "kind": "data",
+                "type": "sensor_data",
+                "node_id": config.NODE_ID,
+                "dst": "dashboard_main",
+                "payload": sensor_data
+            }
+            
+            logger.info(TAG, f"Sending telemetry: {sensor_data}")
+            success = await send_mesh_packet(data_pkt)
+            _handle_tx_result(success) # Check if the gateway is still there!
+            
+        await asyncio.sleep(15)

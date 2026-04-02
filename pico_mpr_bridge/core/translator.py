@@ -267,14 +267,26 @@ def decode_lora_hex(hex_str):
                 "payload": {"temp": u[5]/10.0, "hum": u[6]/10.0}
             }
 
-        # 0x05: ROUTE QUERY (<B16s16s)
-        elif ptype == 0x05 and len(b) == 33:
-            u = struct.unpack('<B16s16s', b)
-            return {
-                "kind": "control", "type": "route_query",
-                "src": u[1].decode('utf-8').strip('\x00'),
-                "dst": u[2].decode('utf-8').strip('\x00')
-            }
+        # 0x05: ROUTE QUERY (<B16s16sBH) - extended with TTL + seq
+        elif ptype == 0x05:
+            if len(b) == 36:
+                u = struct.unpack('<B16s16sBH', b)
+                return {
+                    "kind": "control", "type": "route_query",
+                    "src": u[1].decode('utf-8').strip('\x00'),
+                    "dst": u[2].decode('utf-8').strip('\x00'),
+                    "ttl": u[3],
+                    "seq": u[4]
+                }
+            elif len(b) == 33:
+                u = struct.unpack('<B16s16s', b)
+                return {
+                    "kind": "control", "type": "route_query",
+                    "src": u[1].decode('utf-8').strip('\x00'),
+                    "dst": u[2].decode('utf-8').strip('\x00'),
+                    "ttl": 5,
+                    "seq": 0
+                }
 
         # 0x06: ROUTE RESP (<B16s16s16s12sHB)
         elif ptype == 0x06 and len(b) == 64:
@@ -299,6 +311,29 @@ def decode_lora_hex(hex_str):
                 "role": u[2].decode('utf-8').strip('\x00'),
                 "capabilities": [c for c in caps_str.split(',') if c],
                 "timestamp": u[4]
+            }
+
+        # 0x08: GENERIC DATA FORWARD (<B16s16s16s16sBBH + variable JSON payload)
+        # Header: ptype(1) + src(16) + dst(16) + hop_src(16) + hop_dst(16) + ttl(1) + priority(1) + seq(2) = 69 bytes
+        elif ptype == 0x08 and len(b) >= 69:
+            hdr = struct.unpack('<B16s16s16s16sBBH', b[:69])
+            payload_bytes = b[69:]
+            payload = {}
+            if payload_bytes:
+                try:
+                    payload = json.loads(payload_bytes.decode('utf-8'))
+                except (ValueError, UnicodeError):
+                    payload = {"raw": ubinascii.hexlify(payload_bytes).decode('utf-8')}
+            return {
+                "kind": "data", "type": "data_forward",
+                "src": hdr[1].decode('utf-8').strip('\x00'),
+                "dst": hdr[2].decode('utf-8').strip('\x00'),
+                "hop_src": hdr[3].decode('utf-8').strip('\x00'),
+                "hop_dst": hdr[4].decode('utf-8').strip('\x00'),
+                "ttl": hdr[5],
+                "priority": hdr[6],
+                "seq": hdr[7],
+                "payload": payload
             }
 
     except Exception as e:
@@ -326,11 +361,13 @@ def encode_lora_hex(pkt):
             b = struct.pack('<B16s16s', 0x03, tid, bid)
             return ubinascii.hexlify(b).decode('utf-8')
 
-        # 0x05: ROUTE QUERY (<B16s16s)
+        # 0x05: ROUTE QUERY (<B16s16sBH) - extended with TTL + seq
         elif ptype == "route_query":
             src = pkt.get("src", "").encode('utf-8')[:15]
             dst = pkt.get("dst", "").encode('utf-8')[:15]
-            b = struct.pack('<B16s16s', 0x05, src, dst)
+            ttl = min(int(pkt.get("ttl", 5)), 255)
+            seq = int(pkt.get("seq", 0)) % 65536
+            b = struct.pack('<B16s16sBH', 0x05, src, dst, ttl, seq)
             return ubinascii.hexlify(b).decode('utf-8')
 
         # 0x06: ROUTE RESP (<B16s16s16s12sHB)
@@ -362,6 +399,31 @@ def encode_lora_hex(pkt):
             
             b = struct.pack('<B16s8s32sI', 0x07, nid, role, caps_bytes, ts)
             return ubinascii.hexlify(b).decode('utf-8')
+
+        # 0x08: GENERIC DATA FORWARD — variable-length relay packet
+        # Used for forwarding any data packet across the LoRa chain
+        # Header: ptype(1) + src(16) + dst(16) + hop_src(16) + hop_dst(16) + ttl(1) + priority(1) + seq(2) = 69 bytes
+        # Payload: remaining bytes as JSON (max ~182 bytes to stay within 251-byte LoRa limit)
+        else:
+            src = pkt.get("src", "").encode('utf-8')[:15]
+            dst = pkt.get("dst", "").encode('utf-8')[:15]
+            hop_src = pkt.get("hop_src", "").encode('utf-8')[:15]
+            hop_dst = pkt.get("hop_dst", "").encode('utf-8')[:15]
+            ttl = min(int(pkt.get("ttl", 5)), 255)
+            priority = min(int(pkt.get("priority", 5)), 255)
+            seq = int(pkt.get("seq", 0)) % 65536
+            
+            hdr = struct.pack('<B16s16s16s16sBBH', 0x08, src, dst, hop_src, hop_dst, ttl, priority, seq)
+            
+            payload = pkt.get("payload", {})
+            if isinstance(payload, dict):
+                payload_bytes = json.dumps(payload).encode('utf-8')[:182]
+            elif isinstance(payload, (bytes, bytearray)):
+                payload_bytes = payload[:182]
+            else:
+                payload_bytes = str(payload).encode('utf-8')[:182]
+            
+            return ubinascii.hexlify(hdr + payload_bytes).decode('utf-8')
 
     except Exception as e:
         print("Hex Encode Error:", e)

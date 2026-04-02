@@ -160,6 +160,12 @@ async def rx_task(ingress_queue, neighbour_table):
                             logger.debug(TAG, f"Merged topology from {remote_id} via WiFi-Direct")
                         continue
 
+                    # Tag route control packets with source protocol for AODV
+                    if msg_type in ("route_query", "route_resp"):
+                        msg_obj["_rx_protocol"] = "WiFi-Direct"
+                        ingress_queue.push(1, msg_obj)
+                        continue
+
                     # Normal data packet routing
                     ingress_queue.push(msg_obj.get("priority", packet.PRIORITY_NORMAL), msg_obj)
 

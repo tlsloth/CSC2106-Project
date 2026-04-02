@@ -91,12 +91,59 @@ def main():
     import uasyncio as asyncio
 
     async def translator_task():
-        """Core translator: pull from ingress, route, push to appropriate egress."""
+        """Core translator: pull from ingress, route, push to appropriate egress.
+        Implements AODV-style reactive route discovery with query forwarding."""
         from core.translator import translate_to_mqtt
         logger.info(TAG, "Translator task started")
 
         pending_routes = {}
         last_query_time = {}
+
+        # AODV state for multi-hop route discovery
+        _seen_queries = {}      # (src, dst, seq) -> timestamp — dedup queries
+        _reverse_paths = {}     # (req_src, dst) -> (protocol, timestamp) — reverse path for resp relay
+        _seen_responses = {}    # (req_src, dst, seq) -> timestamp — dedup responses
+        _query_seq = [0]        # mutable counter for outgoing query sequence numbers
+        _prune_counter = [0]
+
+        def _next_query_seq():
+            _query_seq[0] = (_query_seq[0] + 1) % 65536
+            return _query_seq[0]
+
+        def _prune_seen_caches():
+            """Remove stale AODV cache entries every ~100 loop iterations."""
+            _prune_counter[0] += 1
+            if _prune_counter[0] < 100:
+                return
+            _prune_counter[0] = 0
+            now = time.time()
+            for cache in (_seen_queries, _seen_responses):
+                expired = [k for k, ts in cache.items() if now - ts > 120]
+                for k in expired:
+                    del cache[k]
+            expired_rp = [k for k, v in _reverse_paths.items() if now - v[1] > 120]
+            for k in expired_rp:
+                del _reverse_paths[k]
+
+        def _push_to_protocol(protocol, pkt):
+            """Push a packet to the egress queue for the given protocol."""
+            if protocol == "LoRa" and "LoRa" in config.CAPABILITIES:
+                lora_egress.push(1, pkt)
+            elif protocol == "WiFi-Direct" and "WiFi-Direct" in config.CAPABILITIES:
+                wifi_direct_egress.push(1, pkt)
+            else:
+                # Fallback: flood on all available interfaces
+                if "LoRa" in config.CAPABILITIES:
+                    lora_egress.push(1, pkt)
+                if "WiFi-Direct" in config.CAPABILITIES:
+                    wifi_direct_egress.push(1, dict(pkt))
+
+        def _flood_all_interfaces(pkt):
+            """Broadcast a packet on every available interface."""
+            if "LoRa" in config.CAPABILITIES:
+                lora_egress.push(1, pkt)
+            if "WiFi-Direct" in config.CAPABILITIES:
+                wifi_direct_egress.push(1, dict(pkt))
 
         while True:
             try:
@@ -107,36 +154,132 @@ def main():
                         await asyncio.sleep_ms(50)
                         continue
 
-                    if pkt.get("type") == "route_resp":
-                        target_dst = pkt.get("dst") # The destination we originally asked about
-                        status = pkt.get("status")
-                        
-                        # Only process it if we were the bridge that asked, and a route was found!
-                        if pkt.get("req_src") == config.NODE_ID and status == "ok":
-                            next_hop = pkt.get("next_hop")
-                            via_proto = pkt.get("via_protocol")
-                            cost = pkt.get("cost", 10)
-                            
-                            if target_dst and next_hop:
-                                # 1. Memorize the route in our new cache!
-                                routing_table.cache_route(target_dst, next_hop, via_proto, cost)
-                                
-                                # 2. Flush the Holding Pen!
-                                if target_dst in pending_routes:
-                                    logger.info(TAG, f"Flushing {len(pending_routes[target_dst])} held packets for {target_dst}!")
-                                    for held_pkt in pending_routes[target_dst]:
-                                        # Push back into ingress with high priority so it routes instantly
-                                        ingress_queue.push(10, held_pkt) 
-                                    del pending_routes[target_dst]
-                        
-                        # Consume the response packet so it doesn't get routed further
+                    _prune_seen_caches()
+                    pkt_type = pkt.get("type")
+
+                    # ==============================================
+                    # AODV: Handle incoming route_query (forwarding)
+                    # ==============================================
+                    if pkt_type == "route_query":
+                        query_src = pkt.get("src", "")
+                        query_dst = pkt.get("dst", "")
+                        query_seq = pkt.get("seq", 0)
+                        query_ttl = pkt.get("ttl", config.PACKET_TTL)
+                        rx_proto = pkt.get("_rx_protocol", "")
+
+                        # Ignore our own queries bouncing back
+                        if query_src == config.NODE_ID:
+                            continue
+
+                        # Dedup: drop if we've seen this exact query before
+                        query_key = (query_src, query_dst, query_seq)
+                        if query_key in _seen_queries:
+                            continue
+                        _seen_queries[query_key] = time.time()
+
+                        # Record reverse path so we can relay the response back
+                        _reverse_paths[(query_src, query_dst)] = (rx_proto, time.time())
+
+                        # Can we answer this query?
+                        route = None
+                        if query_dst == config.NODE_ID:
+                            # We ARE the destination
+                            route = {"next_hop": config.NODE_ID, "via_protocol": "LOCAL", "cost": 0}
+                        else:
+                            route = routing_table.lookup(query_dst)
+
+                        if route:
+                            # We can answer — send route_resp back toward the querier
+                            resp = {
+                                "type": "route_resp",
+                                "kind": "control",
+                                "req_src": query_src,
+                                "dst": query_dst,
+                                "next_hop": config.NODE_ID,  # "to reach dst, come through me"
+                                "via_protocol": rx_proto or "LoRa",
+                                "cost": route["cost"],
+                                "status": "ok",
+                                "seq": query_seq,
+                            }
+                            _push_to_protocol(rx_proto, resp)
+                            logger.info(TAG, "Answered route_query: {} from {}".format(query_dst, query_src))
+                        else:
+                            # Can't answer — forward the query if TTL allows
+                            if query_ttl <= 1:
+                                logger.debug(TAG, "route_query for {} TTL expired, dropping".format(query_dst))
+                                continue
+
+                            fwd = {
+                                "type": "route_query",
+                                "kind": "control",
+                                "src": query_src,   # preserve original querier
+                                "dst": query_dst,
+                                "ttl": query_ttl - 1,
+                                "seq": query_seq,
+                            }
+                            _flood_all_interfaces(fwd)
+                            logger.info(TAG, "Forwarded route_query: {} from {} TTL={}".format(
+                                query_dst, query_src, query_ttl - 1))
+
                         continue
+
+                    # =====================================================
+                    # AODV: Handle incoming route_resp (cache + relay)
+                    # =====================================================
+                    if pkt_type == "route_resp":
+                        req_src = pkt.get("req_src", "")
+                        target_dst = pkt.get("dst", "")
+                        status = pkt.get("status", "")
+                        relay_node = pkt.get("next_hop", "")
+                        cost = pkt.get("cost", 999)
+                        query_seq = pkt.get("seq", 0)
+                        rx_proto = pkt.get("_rx_protocol", "LoRa")
+
+                        # Dedup: avoid processing the same response twice
+                        resp_key = (req_src, target_dst, query_seq)
+                        if resp_key in _seen_responses:
+                            continue
+                        _seen_responses[resp_key] = time.time()
+
+                        # Cache the discovered route for ourselves
+                        # "To reach target_dst, go through relay_node via rx_proto"
+                        if status == "ok" and relay_node:
+                            routing_table.cache_route(target_dst, relay_node, rx_proto, cost)
+                            logger.info(TAG, "Cached route: {} -> next_hop={} via {} cost={}".format(
+                                target_dst, relay_node, rx_proto, cost))
+
+                        if req_src == config.NODE_ID:
+                            # This response is for US — flush pending packets
+                            if status == "ok" and target_dst in pending_routes:
+                                logger.info(TAG, "Flushing {} held packets for {}".format(
+                                    len(pending_routes[target_dst]), target_dst))
+                                for held_pkt in pending_routes[target_dst]:
+                                    ingress_queue.push(10, held_pkt)
+                                del pending_routes[target_dst]
+                        elif status == "ok":
+                            # Not for us — relay the response toward the original querier
+                            fwd_resp = dict(pkt)
+                            fwd_resp["next_hop"] = config.NODE_ID  # update relay identity
+                            fwd_resp["cost"] = cost + 200          # accumulate hop cost
+                            fwd_resp.pop("_rx_protocol", None)
+
+                            # Use the reverse path recorded during query flooding
+                            rp = _reverse_paths.get((req_src, target_dst))
+                            reverse_proto = rp[0] if rp else ""
+                            _push_to_protocol(reverse_proto, fwd_resp)
+                            logger.info(TAG, "Relayed route_resp: {} toward {}".format(target_dst, req_src))
+
+                        continue
+
+                    # ==============================================
+                    # Regular packet processing
+                    # ==============================================
                     dst = pkt.get("dst")
                     src = pkt.get("src") or pkt.get("node_id") or "unknown"
                     hop_dst = pkt.get("hop_dst")
 
                     if not dst:
-                        logger.warn(f"Packet from {src} has no destination, dropping packet.")
+                        logger.warn(TAG, "Packet from {} has no destination, dropping.".format(src))
                         continue
                     if (
                         src != config.NODE_ID
@@ -157,39 +300,28 @@ def main():
                         pkt["hop_src"] = config.NODE_ID
                         pkt["hop_dst"] = route["next_hop"]
                     else:
-                        # query route if we dont have it, this should only be done if we dont have wifi direct and lora / ble available
-                        logger.info(TAG, f"No route to {dst}, Holding packets for query.")
+                        # No route — hold packet and initiate AODV route query
+                        logger.info(TAG, "No route to {}, holding packet for query.".format(dst))
                         if dst not in pending_routes:
                             pending_routes[dst] = []
-                            pending_routes[dst].append(pkt)
+                        pending_routes[dst].append(pkt)
 
                         now = time.time()
-                        if dst not in last_query_time or (now - last_query_time[dst] > 5):
-                            # create query pkt
+                        if dst not in last_query_time or (now - last_query_time[dst] > 15):
                             query_pkt = {
                                 "type": "route_query",
                                 "kind": "control",
                                 "src": config.NODE_ID,
-                                "dst": dst
+                                "dst": dst,
+                                "ttl": config.PACKET_TTL,
+                                "seq": _next_query_seq(),
                             }
-
-                            if "WiFi-Direct" in config.CAPABILITIES:
-                                wifi_direct_egress.push(1, query_pkt)
-                                logger.debug(TAG, f"Broadcasted route_query for {dst} over WiFi-Direct")
-
-                            # check if we support lora or ble
-                            if "LoRa" in config.CAPABILITIES:
-                                # push with priority
-                                lora_egress.push(1, query_pkt)
-                                logger.debug(TAG, f"Broadcasted route_query for {dst} over LoRa")
-
-                            #ble check
-
-
+                            _flood_all_interfaces(query_pkt)
+                            logger.info(TAG, "Broadcasted route_query for {}".format(dst))
                             last_query_time[dst] = now
                         continue
 
-                    # INJECTION 2: Route packets to the new UDP queue
+                    # Route packets to the appropriate egress queue
                     priority = pkt.get("priority", packet.PRIORITY_NORMAL)
                     if protocol in ("WiFi", "MQTT"):
                         wifi_egress.push(priority, pkt)

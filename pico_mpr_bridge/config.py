@@ -21,7 +21,7 @@ MQTT_KEEPALIVE  = 60
 # Discovery
 HELLO_INTERVAL  = 15                # seconds between Hello broadcasts
 HELLO_TIMEOUT   = 45                # 3x interval -> declare neighbour dead
-ENABLE_LORA_HELLO = False           # Sender endpoints may not consume hello frames
+ENABLE_LORA_HELLO = True            # Enable bridge-to-bridge LoRa hello discovery
 ENABLE_WIFI_HELLO = True            # Keep MQTT/wifi topology discovery enabled
 
 # Mesh join/auth (LoRa edges)

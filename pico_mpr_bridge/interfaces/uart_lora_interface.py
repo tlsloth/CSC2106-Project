@@ -267,15 +267,10 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                             )
                             
                             if msg_kind == "control":
-                                if msg_type == "route_query":
-                                    route = None
-                                    dst = msg.get("dst")
-                                    if dst == config.NODE_ID:
-                                        route = {"next_hop": config.NODE_ID, "via_protocol": "LOCAL", "cost": 0}
-                                    elif routing_table is not None and dst:
-                                        route = routing_table.lookup(dst)
-                                    logger.info(TAG, "route_query dst={} local_id={} route={}".format(dst, config.NODE_ID, route))
-                                    _send_route_response(msg, route, egress_queue)
+                                # Delegate route control to main.py (centralized AODV)
+                                if msg_type in ("route_query", "route_resp"):
+                                    msg["_rx_protocol"] = "LoRa"
+                                    ingress_queue.push(1, msg)
                                     continue
                                 
                                 if msg_type == "hello":
@@ -319,7 +314,7 @@ async def tx_task(egress_queue):
                     if not hex_str:
                         logger.warn(TAG, f"Failed to encode packet to hex: {pkt.get('type')}")
                         continue
-                        
+
                     async with radio_lock:
                         tx_done_event.clear()
                         _send_line(f"LORA_TX|{hex_str}")
@@ -329,6 +324,7 @@ async def tx_task(egress_queue):
                             logger.debug(TAG,"Uno confirmed TX completion")
                         except asyncio.TimeoutError:
                             logger.warn(TAG, "Timeout waiting for Uno TX_DONE confirmation. Releasing lock...")
+                        await asyncio.sleep_ms(200)  # Short delay to allow Uno to process before next command
         except Exception as e:
             logger.error(TAG, "TX error: {}".format(e))
 

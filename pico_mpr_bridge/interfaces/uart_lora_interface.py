@@ -59,9 +59,9 @@ def _send_route_response(query_msg, route, egress_queue):
         "req_src": query_msg.get("src") or query_msg.get("node_id", "unknown"),
         "dst": query_msg.get("dst", "unknown"),
         "status": "ok" if route else "no_route",
-        "next_hop": route["next_hop"] if route else None,
-        "via_protocol": route["via_protocol"] if route else None,
-        "cost": route["cost"] if route else None,
+        "next_hop": route["next_hop"] if route else "",
+        "via_protocol": route["via_protocol"] if route else "",
+        "cost": route["cost"] if route else 999,
         "seq": query_msg.get("seq", 0),
     }
     egress_queue.push(DEFAULT_PRIORITY, response)

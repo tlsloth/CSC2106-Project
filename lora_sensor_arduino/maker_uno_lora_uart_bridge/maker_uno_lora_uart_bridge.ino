@@ -1,6 +1,6 @@
 #include <SPI.h>
 #include <RH_RF95.h>
-
+#include <SoftwareSerial.h>
 // Maker UNO LoRa <-> UART bridge for Pico MPR bridge
 // - Receives raw LoRa binary and forwards it as a Hex String to Pico
 // - Receives Hex Strings from Pico, packs to binary, and transmits over LoRa
@@ -11,7 +11,8 @@
 #define RF95_FREQ 920.0
 
 #define PICO_BAUD 9600
-#define BRIDGE_UART Serial
+SoftwareSerial picoSerial(4,5);
+#define BRIDGE_UART picoSerial
 
 #pragma once
 
@@ -172,7 +173,7 @@ const unsigned long FORCE_REBOOT_INTERVAL = 60000UL; // 1 minutes in millisecond
 
 // A clean helper function so we don't repeat the reset code 3 times!
 void forceRebootRadio(const char* reason) {
-  BRIDGE_UART.print("LORA_STATUS|REBOOTING|");
+  BRIDGE_UART.print("LORA_STATUS|REBOOTING|");x1
   BRIDGE_UART.println(reason);
   
   // Hard-reset the silicon

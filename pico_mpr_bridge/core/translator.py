@@ -4,6 +4,9 @@ import json
 import config
 from core import packet
 from utils import logger
+import struct
+import ubinascii
+
 
 TAG = "XLAT"
 
@@ -209,3 +212,120 @@ def translate_ble_payload(raw_bytes, source_id="unknown"):
     except Exception as e:
         logger.error(TAG, "BLE payload translation error: {}".format(e))
         return None
+
+
+
+import struct
+import ubinascii
+
+def decode_lora_hex(hex_str):
+    """Unpacks Hex strings from the Uno back into standard Mesh JSON dicts."""
+    try:
+        b = ubinascii.unhexlify(hex_str.strip())
+        ptype = b[0]
+        
+        # 0x00: JOIN REQ (<B16s16sIB)
+        if ptype == 0x00 and len(b) == 38:
+            u = struct.unpack('<B16s16sIB', b)
+            return {
+                "kind": "control", "type": "join_req",
+                "node_id": u[1].decode('utf-8').strip('\x00'),
+                "network": u[2].decode('utf-8').strip('\x00'),
+                "auth": f"{u[3]:08x}", "seq": u[4]
+            }
+            
+        # 0x02: HELLO (<B16s16s8sB)
+        elif ptype == 0x02 and len(b) == 42:
+            u = struct.unpack('<B16s16s8sB', b)
+            return {
+                "kind": "control", "type": "hello",
+                "node_id": u[1].decode('utf-8').strip('\x00'),
+                "network": u[2].decode('utf-8').strip('\x00'),
+                "token": ubinascii.hexlify(u[3]).decode('utf-8'),
+                "seq": u[4]
+            }
+            
+        # 0x04: TELEMETRY (<B16s16s16s8shH)
+        elif ptype == 0x04 and len(b) == 61:
+            u = struct.unpack('<B16s16s16s8shH', b)
+            return {
+                "kind": "data", "type": "sensor_data",
+                "node_id": u[1].decode('utf-8').strip('\x00'),
+                "hop_dst": u[2].decode('utf-8').strip('\x00'),
+                "dst": u[3].decode('utf-8').strip('\x00'),
+                "token": ubinascii.hexlify(u[4]).decode('utf-8'),
+                "payload": {"temp": u[5]/10.0, "hum": u[6]/10.0}
+            }
+
+        # 0x05: ROUTE QUERY (<B16s16s)
+        elif ptype == 0x05 and len(b) == 33:
+            u = struct.unpack('<B16s16s', b)
+            return {
+                "kind": "control", "type": "route_query",
+                "src": u[1].decode('utf-8').strip('\x00'),
+                "dst": u[2].decode('utf-8').strip('\x00')
+            }
+
+        # 0x06: ROUTE RESP (<B16s16s16s12sHB)
+        elif ptype == 0x06 and len(b) == 64:
+            u = struct.unpack('<B16s16s16s12sHB', b)
+            return {
+                "kind": "control", "type": "route_resp",
+                "req_src": u[1].decode('utf-8').strip('\x00'),
+                "dst": u[2].decode('utf-8').strip('\x00'),
+                "next_hop": u[3].decode('utf-8').strip('\x00'),
+                "via_protocol": u[4].decode('utf-8').strip('\x00'),
+                "cost": u[5],
+                "status": "ok" if u[6] == 1 else "no_route"
+            }
+
+    except Exception as e:
+        print("Hex Decode Error:", e) # Don't silently swallow errors!
+    return None
+
+def encode_lora_hex(pkt):
+    """Packs JSON Mesh dicts into binary Hex Strings for the Uno to transmit."""
+    ptype = pkt.get("type")
+    try:
+        # 0x01: JOIN ACK (<B16sB16s8s)
+        if ptype == "join_ack":
+            tid = pkt.get("target_id", "").encode('utf-8')[:15]
+            acc = 1 if pkt.get("accepted") else 0
+            bid = pkt.get("bridge_id", "").encode('utf-8')[:15]
+            tok_hex = pkt.get("token", "")
+            tok_bytes = ubinascii.unhexlify(tok_hex) if tok_hex else b'\x00'*8
+            b = struct.pack('<B16sB16s8s', 0x01, tid, acc, bid, tok_bytes)
+            return ubinascii.hexlify(b).decode('utf-8')
+            
+        # 0x03: HELLO ACK (<B16s16s)
+        elif ptype == "hello_ack":
+            tid = pkt.get("target_id", "").encode('utf-8')[:15]
+            bid = pkt.get("bridge_id", "").encode('utf-8')[:15]
+            b = struct.pack('<B16s16s', 0x03, tid, bid)
+            return ubinascii.hexlify(b).decode('utf-8')
+
+        # 0x05: ROUTE QUERY (<B16s16s)
+        elif ptype == "route_query":
+            src = pkt.get("src", "").encode('utf-8')[:15]
+            dst = pkt.get("dst", "").encode('utf-8')[:15]
+            b = struct.pack('<B16s16s', 0x05, src, dst)
+            return ubinascii.hexlify(b).decode('utf-8')
+
+        # 0x06: ROUTE RESP (<B16s16s16s12sHB)
+        elif ptype == "route_resp":
+            req_src = pkt.get("req_src", "").encode('utf-8')[:15]
+            dst = pkt.get("dst", "").encode('utf-8')[:15]
+            nhop = pkt.get("next_hop", "").encode('utf-8')[:15]
+            
+            proto = pkt.get("via_protocol", "")
+            proto_bytes = proto.encode('utf-8')[:11] if proto else b''
+            
+            cost = int(pkt.get("cost", 999))
+            status = 1 if pkt.get("status") == "ok" else 0
+            
+            b = struct.pack('<B16s16s16s12sHB', 0x06, req_src, dst, nhop, proto_bytes, cost, status)
+            return ubinascii.hexlify(b).decode('utf-8')
+
+    except Exception as e:
+        print("Hex Encode Error:", e)
+    return None

@@ -173,6 +173,10 @@ def main():
                                 "dst": dst
                             }
 
+                            if "WiFi-Direct" in config.CAPABILITIES:
+                                wifi_direct_egress.push(1, query_pkt)
+                                logger.debug(TAG, f"Broadcasted route_query for {dst} over WiFi-Direct")
+
                             # check if we support lora or ble
                             if "LoRa" in config.CAPABILITIES:
                                 # push with priority
@@ -180,6 +184,7 @@ def main():
                                 logger.debug(TAG, f"Broadcasted route_query for {dst} over LoRa")
 
                             #ble check
+
 
                             last_query_time[dst] = now
                         continue

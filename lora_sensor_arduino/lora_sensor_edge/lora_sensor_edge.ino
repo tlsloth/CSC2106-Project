@@ -21,7 +21,7 @@ BridgeMeshConfig meshConfig = {
     "dashboard_main", // targetDst
     10000UL,          // joinInterval
     15000UL,          // helloInterval
-    3000UL            // helloAckTimeout
+    10000UL            // helloAckTimeout
 };
 
 BridgeMesh mesh(rf95, meshConfig);
@@ -33,35 +33,10 @@ bool sendTelemetry()
 {
   float humidity = dht.readHumidity();
   float temperature = dht.readTemperature();
-
   if (isnan(humidity) || isnan(temperature))
-  {
     return false;
-  }
 
-  char tempStr[12];
-  char humStr[12];
-  char json[96];
-
-  char type[24] = "sensor_data";
-
-  dtostrf(temperature, 0, 1, tempStr);
-  dtostrf(humidity, 0, 1, humStr);
-
-  int written = snprintf(
-      json,
-      sizeof(json),
-      "{\"temp\":%s,\"hum\":%s}",
-      tempStr,
-      humStr);
-
-  if (written <= 0 || written >= (int)sizeof(json))
-  {
-    return false;
-  }
-
-  bool success = mesh.sendJsonObject(json, type);
-  return success;
+  return mesh.sendTelemetry(temperature, humidity);
 }
 
 void setup()

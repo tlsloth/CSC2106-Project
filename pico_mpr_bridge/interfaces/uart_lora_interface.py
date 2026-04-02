@@ -1,11 +1,7 @@
-try:
-    import ujson as json
-except ImportError:
-    import json
-
 import config
 from core.neighbour import create_hello_payload
 from core.security import check_join_auth, check_node_token, generate_join_token, xor_token_hex
+from core.translator import decode_lora_hex, encode_lora_hex
 from utils import logger
 import uasyncio as asyncio
 
@@ -17,37 +13,6 @@ _rx_buf = b""
 _node_tokens = {}
 radio_lock = asyncio.Lock()
 tx_done_event = asyncio.Event()
-
-
-def _json_dumps(obj):
-    try:
-        return json.dumps(obj, separators=(",", ":"))
-    except TypeError:
-        return json.dumps(obj)
-
-
-def _extract_source_id(payload_bytes):
-    try:
-        if isinstance(payload_bytes, (bytes, bytearray)):
-            payload_text = payload_bytes.decode("utf-8")
-        else:
-            payload_text = str(payload_bytes)
-        msg = json.loads(payload_text)
-        return msg.get("src") or msg.get("node_id") or "lora_uart"
-    except Exception:
-        return "lora_uart"
-
-
-def _parse_json_message(payload_bytes):
-    try:
-        if isinstance(payload_bytes, (bytes, bytearray)):
-            payload_text = payload_bytes.decode("utf-8")
-        else:
-            payload_text = str(payload_bytes)
-        return json.loads(payload_text)
-    except Exception:
-        return None
-
 
 def _message_kind(msg):
     kind = str(msg.get("kind") or "").strip().lower()
@@ -71,7 +36,7 @@ def _send_join_ack(req_msg, accepted, egress_queue, reason="ok", token=""):
         ),
     )
     encrypted_token = xor_token_hex(token, getattr(config, "MESH_JOIN_KEY", "")) if token else ""
-    # create json packet here, then pass to bridge to do TX only
+    
     ack = {
         "kind": "control",
         "type": "join_ack",
@@ -112,7 +77,6 @@ def _send_hello_ack(msg, egress_queue):
         "target_id": node_id,
         "bridge_id": config.NODE_ID
     }
-
     egress_queue.push(DEFAULT_PRIORITY, ack)
 
 
@@ -120,22 +84,6 @@ def _parse_line(raw_line):
     line = raw_line.strip()
     if not line:
         return None
-
-    if line.startswith('{'):
-        try:
-            obj = json.loads(line)
-            raw = obj.get("raw", "")
-            node = str(obj.get("node", "lora_uart"))
-            rssi = int(float(obj.get("rssi", 0)))
-            return {
-                "type": "LORA_RX",
-                "rssi": rssi,
-                "snr": 0.0,
-                "payload": raw.encode("utf-8"),
-                "node": node,
-            }
-        except (ValueError, KeyError, TypeError):
-            pass
 
     parts = line.split("|", 4)
     kind = parts[0]
@@ -189,7 +137,6 @@ def init():
     global _uart
     try:
         from machine import Pin, UART
-
         _uart = UART(
             config.UART_LORA_ID,
             baudrate=config.UART_LORA_BAUD,
@@ -201,10 +148,7 @@ def init():
         logger.info(
             TAG,
             "UART bridge ready: UART{} TX=GP{} RX=GP{} @ {}".format(
-                config.UART_LORA_ID,
-                config.UART_LORA_TX_PIN,
-                config.UART_LORA_RX_PIN,
-                config.UART_LORA_BAUD,
+                config.UART_LORA_ID, config.UART_LORA_TX_PIN, config.UART_LORA_RX_PIN, config.UART_LORA_BAUD
             ),
         )
         return True
@@ -220,7 +164,6 @@ def is_available():
 
 async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=None):
     import random
-    from core.translator import translate_lora_payload
     global _rx_buf, _uart
 
     logger.info(TAG, "LoRa-over-UART RX task started")
@@ -255,7 +198,6 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                         if "LORA_STATUS|TX_DONE" in text:
                             tx_done_event.set()
                             continue
-                        
 
                         parsed = _parse_line(text)
                         if not parsed:
@@ -267,20 +209,26 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                             logger.warn(TAG, "Bridge error: {}".format(parsed["line"]))
                         elif parsed["type"] == "LORA_RX":
                             payload = parsed["payload"]
-                            source_id = parsed.get("node") or _extract_source_id(payload)
+                            
+                            try:
+                                hex_str = payload.decode("utf-8", "ignore")
+                            except Exception:
+                                hex_str = str(payload)
 
-                            msg = _parse_json_message(payload)
+                            # --- NEW: PURE HEX UNPACKING ONLY ---
+                            msg = decode_lora_hex(hex_str)
+                            
                             if not isinstance(msg, dict):
-                                logger.warn(TAG, "Dropped non-JSON payload from {}".format(source_id))
+                                logger.warn(TAG, "Dropped invalid/non-hex payload")
                                 continue
 
                             msg_type = str(msg.get("type") or "")
                             if not msg_type:
-                                logger.warn(TAG, "Dropped packet from {} with no type".format(source_id))
+                                logger.warn(TAG, "Dropped packet with no type")
                                 continue
 
                             msg_kind = _message_kind(msg)
-                            msg_node_id = str(msg.get("node_id") or msg.get("src") or source_id)
+                            msg_node_id = str(msg.get("node_id") or msg.get("src") or "unknown")
 
                             if msg_type == "join_req" and msg_kind == "control":
                                 ok, reason = check_join_auth(
@@ -288,28 +236,27 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                     getattr(config, "MESH_NETWORK_NAME", ""),
                                     getattr(config, "MESH_JOIN_KEY", ""),
                                 )
-                                node_id = str(msg.get("node_id") or source_id)
                                 token = ""
                                 if ok:
                                     token = generate_join_token(
                                         token_bytes=int(getattr(config, "MESH_JOIN_TOKEN_BYTES", 8) or 8),
                                         entropy_hint=len(_node_tokens),
                                     )
-                                    _node_tokens[node_id] = token
+                                    _node_tokens[msg_node_id] = token
                                     neighbour_table.update(
-                                        node_id,
+                                        msg_node_id,
                                         protocols=["LoRa"],
                                         rssi=parsed.get("rssi", 0),
                                         capabilities=msg.get("capabilities", ["LoRa"]),
                                     )
-                                    logger.info(TAG, "Join accepted for {}".format(node_id))
+                                    logger.info(TAG, "Join accepted for {}".format(msg_node_id))
                                 else:
-                                    _node_tokens.pop(node_id, None)
-                                    logger.warn(TAG, "Join rejected for {} ({})".format(source_id, reason))
-                                await asyncio.sleep(random.randint(100, 500))  # Mitigate join ack collisions
+                                    _node_tokens.pop(msg_node_id, None)
+                                    logger.warn(TAG, "Join rejected for {} ({})".format(msg_node_id, reason))
+
+                                await asyncio.sleep_ms(random.randint(100, 500))
                                 _send_join_ack(msg, ok, egress_queue, reason, token)
                                 continue
-
 
                             token_ok, token_reason = check_node_token(
                                 msg,
@@ -317,14 +264,7 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                 getattr(config, "MESH_JOIN_KEY", ""),
                             )
                             if not token_ok:
-                                logger.warn(
-                                    TAG,
-                                    "Dropped {} from {} ({})".format(
-                                        msg_type,
-                                        msg_node_id,
-                                        token_reason,
-                                    ),
-                                )
+                                logger.warn(TAG, "Dropped {} from {} ({})".format(msg_type, msg_node_id, token_reason))
                                 continue
 
                             neighbour_table.update(
@@ -333,39 +273,31 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                                 rssi=parsed.get("rssi", 0),
                                 capabilities=msg.get("capabilities", ["LoRa"]),
                             )
+                            
                             if msg_kind == "control":
                                 if msg_type == "route_query":
                                     route = None
                                     dst = msg.get("dst")
                                     if dst == config.NODE_ID:
-                                        route = {
-                                            "next_hop": config.NODE_ID,
-                                            "via_protocol": "LOCAL",
-                                            "cost": 0,
-                                        }
+                                        route = {"next_hop": config.NODE_ID, "via_protocol": "LOCAL", "cost": 0}
                                     elif routing_table is not None and dst:
                                         route = routing_table.lookup(dst)
                                     logger.info(TAG, "route_query dst={} local_id={} route={}".format(dst, config.NODE_ID, route))
-                                    _send_route_response(msg, route,egress_queue)
+                                    _send_route_response(msg, route, egress_queue)
                                     continue
                                 
                                 if msg_type == "hello":
-                                    _send_hello_ack(msg,egress_queue)
+                                    _send_hello_ack(msg, egress_queue)
                                 if msg_type in ("hello", "hello_ack", "join_ack"):
                                     continue
 
                             if isinstance(msg, dict):
-                                msg["rssi"] = parsed.get("rssi",0)
+                                msg["rssi"] = parsed.get("rssi", 0)
                                 if "ttl" not in msg:
                                     msg["ttl"] = getattr(config, "PACKET_TTL", 5)
                                 
-                                ingress_queue.push(
-                                    msg.get("priority", DEFAULT_PRIORITY),
-                                    msg
-                                )
+                                ingress_queue.push(msg.get("priority", DEFAULT_PRIORITY), msg)
                                 logger.debug(TAG, f"Pushed {msg_type} to ingress queue")
-                            else:
-                                logger.warn(TAG, f"Dropped unformatted message: {msg} ")
 
                         else:
                             logger.debug(TAG, "Unrecognized bridge line: {}".format(parsed["line"]))
@@ -381,7 +313,7 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
 
         await asyncio.sleep_ms(20)
 
-# Used to pass from pico to another lora device
+
 async def tx_task(egress_queue):
     logger.info(TAG, "LoRa-over-UART TX task started")
     while True:
@@ -389,20 +321,19 @@ async def tx_task(egress_queue):
             if _uart is not None and not egress_queue.is_empty():
                 pkt = egress_queue.pop()
                 if pkt:
-                    if isinstance(pkt, dict):
-                        if "kind" not in pkt:
-                            pkt["kind"] = "data"
-                        text_payload = _json_dumps(pkt)
-                    elif isinstance(pkt, (bytes, bytearray)):
-                        text_payload = pkt.decode("utf-8", "ignore")
-                    else:
-                        text_payload = str(pkt)
+                    # --- NEW: PURE HEX ENCODING ONLY ---
+                    hex_str = encode_lora_hex(pkt)
+                    
+                    if not hex_str:
+                        logger.warn(TAG, f"Failed to encode packet to hex: {pkt.get('type')}")
+                        continue
+                        
                     async with radio_lock:
                         tx_done_event.clear()
-                        _send_line(f"LORA_TX|{text_payload}")
-                        logger.debug(TAG, f"Commanded Uno to TX:{len(text_payload)} bytes")
+                        _send_line(f"LORA_TX|{hex_str}")
+                        logger.debug(TAG, f"Commanded Uno to TX: {len(hex_str)} hex chars")
                         try:
-                            await asyncio.wait_for(tx_done_event.wait(),timeout=5.0)
+                            await asyncio.wait_for(tx_done_event.wait(), timeout=5.0)
                             logger.debug(TAG,"Uno confirmed TX completion")
                         except asyncio.TimeoutError:
                             logger.warn(TAG, "Timeout waiting for Uno TX_DONE confirmation. Releasing lock...")
@@ -411,7 +342,7 @@ async def tx_task(egress_queue):
 
         await asyncio.sleep_ms(50)
 
-# Proof that bridge is still alive to neighbouring bridges
+
 async def hello_task(neighbour_table, egress_queue):
     import uasyncio as asyncio
 

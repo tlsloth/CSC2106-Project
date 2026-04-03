@@ -62,7 +62,7 @@ LORA_TX_POWER   = 14               # dBm
 # LoRa over UART bridge parameters (Maker UNO + LoRa shield)
 # GP0 = UART0 TX, GP1 = UART0 RX  (matches lora_uart_bridge.py wiring)
 UART_LORA_ID         = 0
-UART_LORA_BAUD       = 9600
+UART_LORA_BAUD       = 115200 # Changed from 9600
 UART_LORA_TX_PIN     = 0           # GP0
 UART_LORA_RX_PIN     = 1           # GP1
 UART_LORA_TIMEOUT_MS = 100

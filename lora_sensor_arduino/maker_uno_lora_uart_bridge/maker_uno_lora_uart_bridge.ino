@@ -4,7 +4,7 @@
 // Increase SoftwareSerial RX buffer from default 64 to 256 bytes.
 // A LORA_TX command from Pico can be ~131 bytes; default 64 causes overflow.
 #define _SS_MAX_RX_BUFF 256
-#include <SoftwareSerial.h>
+// #include <SoftwareSerial.h>
 // Maker UNO LoRa <-> UART bridge for Pico MPR bridge
 // - Receives raw LoRa binary and forwards it as a Hex String to Pico
 // - Receives Hex Strings from Pico, packs to binary, and transmits over LoRa
@@ -14,9 +14,10 @@
 #define RFM95_INT 2
 #define RF95_FREQ 920.0
 
-#define PICO_BAUD 9600
-SoftwareSerial picoSerial(4,5);
-#define BRIDGE_UART picoSerial
+#define PICO_BAUD 115200 //changed froim 9600
+// SoftwareSerial picoSerial(4,5);
+// #define BRIDGE_UART picoSerial 
+#define BRIDGE_UART Serial
 
 // A 255-byte LoRa payload requires 510 hex characters + "LORA_TX|" prefix
 #define UART_LINE_MAX 520

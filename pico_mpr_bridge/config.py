@@ -1,16 +1,18 @@
 # config.py — All tuneable parameters for the MPR Bridge
 
 # Node identity
-NODE_ID         = "bridge_01"
+NODE_ID         = "bridge_B"
 NODE_ROLE       = "bridge"          # "bridge" | "sensor" | "dashboard"
-CAPABILITIES    = ["LoRa", "BLE", "WiFi", "MQTT"]
+CAPABILITIES    = ["LoRa", "WiFi-Direct"] 
 
 # WiFi credentials
-WIFI_SSID       = "WJ"
-WIFI_PASSWORD   = "Weejer18"
+WIFI_SSID       = "Gigachad Laptop"
+WIFI_PASSWORD   = "12345678"
+WIFI_CONNECT_ATTEMPTS = 3          # Retry association attempts before failing startup
+WIFI_CONNECT_TIMEOUT_S = 20         # Per-attempt connect timeout in seconds
 
 # MQTT broker
-MQTT_BROKER     = "192.168.1.100"
+MQTT_BROKER     = "192.168.137.1"
 MQTT_PORT       = 1883
 MQTT_USER       = ""
 MQTT_PASSWORD   = ""
@@ -18,9 +20,15 @@ MQTT_KEEPALIVE  = 60
 
 # Discovery
 HELLO_INTERVAL  = 15                # seconds between Hello broadcasts
-HELLO_TIMEOUT   = 45                # 3x interval -> declare neighbour dead
-ENABLE_LORA_HELLO = False           # Sender endpoints may not consume hello frames
+HELLO_TIMEOUT   = 90                # 6x interval -> declare neighbour dead (forgiving for LoRa loss)
+ENABLE_LORA_HELLO = True            # Enable bridge-to-bridge LoRa hello discovery
 ENABLE_WIFI_HELLO = True            # Keep MQTT/wifi topology discovery enabled
+
+# Mesh join/auth (LoRa edges)
+MESH_NETWORK_NAME = "CSC2106_MESH"  # Shared network identity for discovery/join
+MESH_JOIN_KEY     = "mesh_key_v1"   # Basic shared key for join acceptance
+JOIN_ACK_TIMEOUT_S = 20              # Optional: edge-side join timeout guidance
+MESH_JOIN_TOKEN_BYTES = 8            # Session token size (hex string = 2x this length)
 
 # Cost model (cross-protocol translation costs)
 COST_NATIVE     = 1                 # LoRa->LoRa, WiFi->WiFi, BLE->BLE
@@ -38,6 +46,9 @@ MQTT_ALERT_TOPIC    = "mesh/alert/{node_id}"
 MQTT_TOPO_TOPIC     = "mesh/topology/{node_id}"
 MQTT_CMD_TOPIC      = "mesh/cmd/{node_id}"
 MQTT_HELLO_TOPIC    = "mesh/hello"
+MQTT_TOPIC_LATEST   = "mesh/latest/{node_id}"  # Legacy dashboard compatibility
+ENABLE_UART_BRIDGE_COMPAT = True                # Publish legacy mesh/data + mesh/latest payload shape
+UART_BRIDGE_COMPAT_KEEP_STANDARD = False        # For legacy dashboards, prefer node/T/H/rssi payload on mesh/data
 
 # LoRa parameters (SX1276 / RFM95W)
 LORA_TRANSPORT  = "UART"          # "SPI" direct Pico, "I2C" bridge, "UART" bridge
@@ -56,25 +67,6 @@ UART_LORA_TX_PIN     = 0           # GP0
 UART_LORA_RX_PIN     = 1           # GP1
 UART_LORA_TIMEOUT_MS = 100
 
-# LoRa over I2C bridge parameters (Maker UNO + LoRa shield)
-I2C_LORA_ID         = 0
-I2C_LORA_SDA_PIN    = 4
-I2C_LORA_SCL_PIN    = 5
-I2C_LORA_FREQ       = 50000
-I2C_LORA_ADDR       = 0x42
-I2C_LORA_POLL_MS    = 100
-I2C_LORA_MAX_FRAME  = 200
-I2C_LORA_CHUNK      = 24
-I2C_LORA_RETRIES    = 3
-
-# LoRa SPI pin mapping (SX1276 RFM95W shield)
-LORA_SPI_ID     = 0
-LORA_PIN_SCK    = 18
-LORA_PIN_MOSI   = 19
-LORA_PIN_MISO   = 16
-LORA_PIN_CS     = 17
-LORA_PIN_RESET  = 20
-LORA_PIN_DIO0   = 21               # SX127x uses DIO0 (not DIO1)
 
 # BLE parameters (use 16-bit UUIDs for Pico W compatibility)
 BLE_SERVICE_UUID    = 0xFFF0       # BLE sensor service UUID

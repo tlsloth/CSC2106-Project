@@ -1,26 +1,83 @@
-import json
-
 import config
-from core import packet
-from core.neighbour import create_hello_payload, parse_hello
+from core.neighbour import create_hello_payload
+from core.security import check_join_auth, check_node_token, generate_join_token, xor_token_hex
+from core.translator import decode_lora_hex, encode_lora_hex
 from utils import logger
+import uasyncio as asyncio
 
 TAG = "LoRaUART"
+DEFAULT_PRIORITY = 5
 
 _uart = None
 _rx_buf = b""
+_node_tokens = {}
+radio_lock = asyncio.Lock()
+tx_done_event = asyncio.Event()
+
+def _message_kind(msg):
+    kind = str(msg.get("kind") or "").strip().lower()
+    if kind in ("control", "data"):
+        return kind
+
+    msg_type = str(msg.get("type") or "").strip().lower()
+    if msg_type in ("join_req", "join_ack", "hello", "hello_ack", "route_query", "route_resp"):
+        return "control"
+    return "data"
 
 
-def _extract_source_id(payload_bytes):
-    try:
-        if isinstance(payload_bytes, (bytes, bytearray)):
-            payload_text = payload_bytes.decode("utf-8")
-        else:
-            payload_text = str(payload_bytes)
-        msg = json.loads(payload_text)
-        return msg.get("src") or msg.get("node_id") or "lora_uart"
-    except Exception:
-        return "lora_uart"
+def _send_join_ack(req_msg, accepted, egress_queue, reason="ok", token=""):
+    node_id = str(req_msg.get("node_id") or req_msg.get("src") or "unknown")
+    logger.info(
+        TAG,
+        "TX join_ack to {} accepted={} reason={} via UART bridge command".format(
+            node_id,
+            bool(accepted),
+            reason,
+        ),
+    )
+    encrypted_token = xor_token_hex(token, getattr(config, "MESH_JOIN_KEY", "")) if token else ""
+    
+    ack = {
+        "kind": "control",
+        "type": "join_ack",
+        "accepted": bool(accepted),
+        "src": config.NODE_ID,
+        "bridge_id": config.NODE_ID,
+        "target_id": node_id,
+        "reason": reason,
+        "token": encrypted_token,
+    }
+    egress_queue.push(DEFAULT_PRIORITY, ack)
+
+
+def _send_route_response(query_msg, route, egress_queue):
+    response = {
+        "kind": "control",
+        "type": "route_resp",
+        "node_id": config.NODE_ID,
+        "src": config.NODE_ID,
+        "req_src": query_msg.get("src") or query_msg.get("node_id", "unknown"),
+        "dst": query_msg.get("dst", "unknown"),
+        "status": "ok" if route else "no_route",
+        "next_hop": route["next_hop"] if route else "",
+        "via_protocol": route["via_protocol"] if route else "",
+        "cost": route["cost"] if route else 999,
+        "seq": query_msg.get("seq", 0),
+    }
+    egress_queue.push(DEFAULT_PRIORITY, response)
+
+
+def _send_hello_ack(msg, egress_queue):
+    node_id = str(msg.get("node_id") or msg.get("src") or "unknown")
+    logger.debug(TAG, f"Queueing hello_ack to target_id: {node_id}")
+
+    ack = {
+        "kind": "control",
+        "type": "hello_ack",
+        "target_id": node_id,
+        "bridge_id": config.NODE_ID
+    }
+    egress_queue.push(DEFAULT_PRIORITY, ack)
 
 
 def _parse_line(raw_line):
@@ -28,27 +85,6 @@ def _parse_line(raw_line):
     if not line:
         return None
 
-    # JSON format: {"raw": "T:25.3,H:60.5", "node": "A", "rssi": -75}
-    # This is the format produced by lora_uart_bridge.py-compatible Arduino firmware.
-    if line.startswith('{'):
-        try:
-            obj = json.loads(line)
-            raw = obj.get("raw", "")
-            node = str(obj.get("node", "lora_uart"))
-            rssi = int(float(obj.get("rssi", 0)))
-            return {
-                "type": "LORA_RX",
-                "rssi": rssi,
-                "snr": 0.0,
-                "payload": raw.encode("utf-8"),
-                "node": node,
-            }
-        except (ValueError, KeyError):
-            pass
-
-    # Pipe-delimited formats from UNO bridge:
-    # - LORA_RX|rssi|snr|payload
-    # - LORA_RX|rssi|snr|node|payload
     parts = line.split("|", 4)
     kind = parts[0]
 
@@ -89,14 +125,18 @@ def _parse_line(raw_line):
 def _send_line(text):
     if _uart is None:
         raise OSError("UART bridge not initialised")
-    _uart.write((text + "\n").encode("utf-8"))
+    out = (text + "\n").encode("utf-8")
+    written = _uart.write(out)
+    if written is None:
+        logger.warn(TAG, "UART write returned None")
+    elif written != len(out):
+        logger.warn(TAG, "UART partial write: {}/{} bytes".format(written, len(out)))
 
 
 def init():
     global _uart
     try:
         from machine import Pin, UART
-
         _uart = UART(
             config.UART_LORA_ID,
             baudrate=config.UART_LORA_BAUD,
@@ -108,10 +148,7 @@ def init():
         logger.info(
             TAG,
             "UART bridge ready: UART{} TX=GP{} RX=GP{} @ {}".format(
-                config.UART_LORA_ID,
-                config.UART_LORA_TX_PIN,
-                config.UART_LORA_RX_PIN,
-                config.UART_LORA_BAUD,
+                config.UART_LORA_ID, config.UART_LORA_TX_PIN, config.UART_LORA_RX_PIN, config.UART_LORA_BAUD
             ),
         )
         return True
@@ -125,25 +162,27 @@ def is_available():
     return _uart is not None
 
 
-async def rx_task(ingress_queue, neighbour_table):
-    import uasyncio as asyncio
-    from core.translator import translate_lora_payload
-    global _rx_buf
+async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=None):
+    import random
+    global _rx_buf, _uart
 
     logger.info(TAG, "LoRa-over-UART RX task started")
 
     while True:
         try:
             if _uart is None:
-                await asyncio.sleep(5)
+                if init():
+                    logger.info(TAG, "UART recovered")
+                else:
+                    await asyncio.sleep(5)
                 continue
 
-            if _uart.any():
-                chunk = _uart.read(_uart.any())
+            available = _uart.any()
+            if available:
+                chunk = _uart.read(available)
                 if chunk:
                     _rx_buf += chunk
 
-                    # Match lora_uart_bridge.py behavior: parse complete newline-delimited lines.
                     while b"\n" in _rx_buf:
                         line, _rx_buf = _rx_buf.split(b"\n", 1)
                         line = line.strip()
@@ -155,7 +194,10 @@ async def rx_task(ingress_queue, neighbour_table):
                         except Exception:
                             text = str(line)
 
-                        logger.info(TAG, "UART RX: {}".format(text))
+                        logger.info(TAG, "Received through UART: {}".format(text))
+                        if "LORA_STATUS|TX_DONE" in text:
+                            tx_done_event.set()
+                            continue
 
                         parsed = _parse_line(text)
                         if not parsed:
@@ -167,77 +209,153 @@ async def rx_task(ingress_queue, neighbour_table):
                             logger.warn(TAG, "Bridge error: {}".format(parsed["line"]))
                         elif parsed["type"] == "LORA_RX":
                             payload = parsed["payload"]
-                            # Use the explicit node field when present (JSON format), else
-                            # fall back to extracting source_id from the payload body.
-                            source_id = parsed.get("node") or _extract_source_id(payload)
+                            
+                            try:
+                                hex_str = payload.decode("utf-8", "ignore")
+                            except Exception:
+                                hex_str = str(payload)
 
-                            # For simple endpoint nodes (e.g., DHT sender) that don't emit hello,
-                            # treat inbound data as proof of neighbour presence.
-                            if source_id and source_id != "lora_uart":
-                                neighbour_table.update(
-                                    source_id,
-                                    protocols=["LoRa"],
-                                    rssi=parsed.get("rssi", 0),
-                                    capabilities=["LoRa"],
-                                )
+                            # --- NEW: PURE HEX UNPACKING ONLY ---
+                            msg = decode_lora_hex(hex_str)
+                            
+                            if not isinstance(msg, dict):
+                                logger.warn(TAG, "Dropped invalid/non-hex payload")
+                                continue
 
-                            hello = parse_hello(payload)
-                            if hello:
-                                neighbour_table.update(
-                                    hello["node_id"],
-                                    protocols=["LoRa"],
-                                    rssi=parsed["rssi"],
-                                    capabilities=hello.get("capabilities", ["LoRa"]),
+                            msg_type = str(msg.get("type") or "")
+                            if not msg_type:
+                                logger.warn(TAG, "Dropped packet with no type")
+                                continue
+
+                            msg_kind = _message_kind(msg)
+                            msg_node_id = str(msg.get("node_id") or msg.get("src") or "unknown")
+
+                            if msg_type == "join_req" and msg_kind == "control":
+                                ok, reason = check_join_auth(
+                                    msg,
+                                    getattr(config, "MESH_NETWORK_NAME", ""),
+                                    getattr(config, "MESH_JOIN_KEY", ""),
                                 )
-                            else:
-                                pkt = translate_lora_payload(
-                                    payload,
-                                    source_id=source_id,
-                                )
-                                if pkt:
-                                    ingress_queue.push(
-                                        pkt.get("priority", packet.PRIORITY_NORMAL),
-                                        pkt,
+                                token = ""
+                                if ok:
+                                    token = generate_join_token(
+                                        token_bytes=int(getattr(config, "MESH_JOIN_TOKEN_BYTES", 8) or 8),
+                                        entropy_hint=len(_node_tokens),
                                     )
+                                    _node_tokens[msg_node_id] = token
+                                    neighbour_table.update(
+                                        msg_node_id,
+                                        protocols=["LoRa"],
+                                        rssi=parsed.get("rssi", 0),
+                                        capabilities=msg.get("capabilities", ["LoRa"]),
+                                    )
+                                    logger.info(TAG, "Join accepted for {}".format(msg_node_id))
+                                else:
+                                    _node_tokens.pop(msg_node_id, None)
+                                    logger.warn(TAG, "Join rejected for {} ({})".format(msg_node_id, reason))
+
+                                await asyncio.sleep_ms(random.randint(100, 500))
+                                _send_join_ack(msg, ok, egress_queue, reason, token)
+                                continue
+
+                            if msg_kind == "control":
+                                # Delegate route control to main.py (centralized AODV)
+                                # Skip neighbour update — these packets don't carry
+                                # a proper node_id/src identity of the transmitter
+                                if msg_type in ("route_query", "route_resp"):
+                                    msg["_rx_protocol"] = "LoRa"
+                                    ingress_queue.push(1, msg)
+                                    continue
+
+                            # Update neighbour table for all other packet types
+                            neighbour_table.update(
+                                msg_node_id,
+                                protocols=["LoRa"],
+                                rssi=parsed.get("rssi", 0),
+                                capabilities=msg.get("capabilities", ["LoRa"]),
+                            )
+                            
+                            if msg_kind == "control":
+                                if msg_type == "hello":
+                                    role = msg.get("role", "")
+                                    if role != "bridge":
+                                        _send_hello_ack(msg, egress_queue)
+                                if msg_type in ("hello", "hello_ack", "join_ack"):
+                                    continue
+
+                            if isinstance(msg, dict):
+                                msg["rssi"] = parsed.get("rssi", 0)
+                                if "ttl" not in msg:
+                                    msg["ttl"] = getattr(config, "PACKET_TTL", 5)
+                                
+                                ingress_queue.push(msg.get("priority", DEFAULT_PRIORITY), msg)
+                                logger.debug(TAG, f"Pushed {msg_type} to ingress queue")
+
                         else:
                             logger.debug(TAG, "Unrecognized bridge line: {}".format(parsed["line"]))
 
         except Exception as e:
             logger.error(TAG, "RX error: {}".format(e))
+            try:
+                if _uart is not None:
+                    _uart.deinit()
+            except Exception:
+                pass
+            _uart = None
 
         await asyncio.sleep_ms(20)
 
 
 async def tx_task(egress_queue):
-    import uasyncio as asyncio
-
     logger.info(TAG, "LoRa-over-UART TX task started")
     while True:
         try:
             if _uart is not None and not egress_queue.is_empty():
                 pkt = egress_queue.pop()
                 if pkt:
-                    payload = packet.encode_packet(pkt)
-                    text_payload = payload.decode("utf-8") if isinstance(payload, (bytes, bytearray)) else str(payload)
-                    _send_line("LORA_TX|{}".format(text_payload))
-                    logger.debug(TAG, "TX forwarded to bridge: {} bytes".format(len(text_payload)))
+                    # --- NEW: PURE HEX ENCODING ONLY ---
+                    hex_str = encode_lora_hex(pkt)
+                    
+                    if not hex_str:
+                        logger.warn(TAG, f"Failed to encode packet to hex: {pkt.get('type')}")
+                        continue
+
+                    async with radio_lock:
+                        tx_done_event.clear()
+                        _send_line(f"LORA_TX|{hex_str}")
+                        logger.debug(TAG, f"Commanded Uno to TX: {len(hex_str)} hex chars")
+                        try:
+                            await asyncio.wait_for(tx_done_event.wait(), timeout=5.0)
+                            logger.debug(TAG,"Uno confirmed TX completion")
+                        except asyncio.TimeoutError:
+                            logger.warn(TAG, "Timeout waiting for Uno TX_DONE confirmation. Releasing lock...")
+                        await asyncio.sleep_ms(20)
         except Exception as e:
             logger.error(TAG, "TX error: {}".format(e))
 
-        await asyncio.sleep_ms(200)
+        await asyncio.sleep_ms(50)
 
 
-async def hello_task(neighbour_table):
+async def hello_task(neighbour_table, egress_queue):
     import uasyncio as asyncio
+    import random
 
     logger.info(TAG, "LoRa-over-UART Hello task started")
+    # Random initial delay to desync bridges that boot simultaneously
+    await asyncio.sleep_ms(random.randint(1000, 5000))
+
     while True:
         try:
             if _uart is not None:
                 hello = create_hello_payload()
-                _send_line("LORA_TX|{}".format(json.dumps(hello)))
+                if isinstance(hello, dict) and "kind" not in hello:
+                    hello["kind"] = "control"
+                egress_queue.push(DEFAULT_PRIORITY+1, hello)
                 logger.debug(TAG, "Sent LoRa Hello via UART bridge")
         except Exception as e:
             logger.error(TAG, "Hello broadcast error: {}".format(e))
 
-        await asyncio.sleep(config.HELLO_INTERVAL)
+        # Add +/- 3s jitter to avoid synchronized TX collisions between bridges
+        base = getattr(config, "HELLO_INTERVAL", 30)
+        jitter = random.randint(-3000, 3000)
+        await asyncio.sleep_ms(base * 1000 + jitter)

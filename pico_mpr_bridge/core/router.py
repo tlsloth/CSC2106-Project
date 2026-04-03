@@ -2,36 +2,56 @@
 
 import config
 from utils import logger
+import time
 
 TAG = "RTR"
 
-# Cost lookup for protocol translation pairs
-_COST_MAP = {
-    ("LoRa", "LoRa"):  config.COST_NATIVE,
-    ("WiFi", "WiFi"):  config.COST_NATIVE,
-    ("BLE", "BLE"):    config.COST_NATIVE,
-    ("MQTT", "MQTT"):  config.COST_NATIVE,
-    ("LoRa", "WiFi"):  config.COST_LORA_WIFI,
-    ("WiFi", "LoRa"):  config.COST_LORA_WIFI,
-    ("BLE", "WiFi"):   config.COST_BLE_WIFI,
-    ("WiFi", "BLE"):   config.COST_BLE_WIFI,
-    ("LoRa", "BLE"):   config.COST_LORA_BLE,
-    ("BLE", "LoRa"):   config.COST_LORA_BLE,
+# Protocol Base Costs (Lower = Higher Bandwidth / Preference)
+_PROTOCOL_BASE_COST = {
+    "MQTT": 10,
+    "LOCAL": 10,
+    "WiFi-Direct": 15,
+    "WiFi": 15,
+    "BLE": 50,
+    "LoRa": 200
 }
 
+def _calculate_rssi_multiplier(rssi):
+    """Calculates penalty multiplier based on signal strength."""
+    if rssi == 0:  # Usually means local, MQTT, or unknown (assume perfect)
+        return 1.0
+    if rssi >= -65:
+        return 1.0
+    elif rssi >= -85:
+        return 1.2
+    elif rssi >= -100:
+        return 1.5
+    else:
+        return 2.0
 
-def get_translation_cost(proto_a, proto_b):
-    """Return the cost of translating between two protocols."""
-    if proto_a == proto_b:
-        return config.COST_NATIVE
-    return _COST_MAP.get((proto_a, proto_b), 10)  # default high cost for unknown pairs
-
+def get_edge_cost(protos_a, protos_b, rssi):
+    """Finds the best shared protocol and calculates the physical link cost."""
+    # To communicate over the air, nodes MUST share at least one protocol
+    shared_protocols = set(protos_a).intersection(set(protos_b))
+    
+    if not shared_protocols:
+        return float("inf") # No shared language over the air!
+        
+    # Find the absolute fastest (cheapest) shared protocol
+    min_base_cost = float("inf")
+    for p in shared_protocols:
+        cost = _PROTOCOL_BASE_COST.get(p, 500) # Default huge cost for unknown
+        if cost < min_base_cost:
+            min_base_cost = cost
+            
+    multiplier = _calculate_rssi_multiplier(rssi)
+    return min_base_cost * multiplier
 
 def build_graph(neighbour_table, self_id=None):
     """Build a weighted graph from the neighbour table for Dijkstra.
 
     The graph is: { node_id: { neighbour_id: cost, ... }, ... }
-    Cost is the minimum translation cost between the two nodes' shared protocols.
+    Cost is the minimum translation cost between the two nodes' shared protocols + rssi calculation.
     """
     if self_id is None:
         self_id = config.NODE_ID
@@ -42,39 +62,38 @@ def build_graph(neighbour_table, self_id=None):
     graph = {n: {} for n in nodes}
 
     # Edges from self to direct neighbours
+# 1. Edges from self to direct neighbours
     self_protos = config.CAPABILITIES
     for nid, entry in all_entries.items():
         if entry.get("via"):
-            # 2-hop neighbour — don't add direct edge from self
-            continue
+            continue # 2-hop neighbour
+            
         nbr_protos = entry.get("protocols", [])
-        # Find minimum cost across protocol pairs
-        min_cost = float("inf")
-        for sp in self_protos:
-            for np in nbr_protos:
-                c = get_translation_cost(sp, np)
-                if c < min_cost:
-                    min_cost = c
-        if min_cost < float("inf"):
-            graph[self_id][nid] = min_cost
-            graph[nid][self_id] = min_cost
+        rssi = entry.get("rssi", 0)
+        
+        # NEW MATH: Calculate link cost based on shared protocols and RSSI
+        final_cost = get_edge_cost(self_protos, nbr_protos, rssi)
+        
+        if final_cost < float("inf"):
+            graph[self_id][nid] = final_cost
+            graph[nid][self_id] = final_cost
 
-    # Edges between remote neighbours (from merged topology)
+    # 2. Edges between remote neighbours (from merged topology)
+
     for nid, entry in all_entries.items():
         via = entry.get("via")
         if via and via in graph:
-            nbr_protos = entry.get("protocols", [])
-            via_protos = all_entries.get(via, {}).get("protocols", [])
-            min_cost = float("inf")
-            for vp in via_protos:
-                for np in nbr_protos:
-                    c = get_translation_cost(vp, np)
-                    if c < min_cost:
-                        min_cost = c
-            if min_cost < float("inf"):
-                graph.setdefault(via, {})[nid] = min_cost
-                graph.setdefault(nid, {})[via] = min_cost
-
+            nbr_protos = entry.get("capabilities", []) 
+            via_protos = all_entries.get(via, {}).get("capabilities", []) 
+            
+            rssi = entry.get("rssi", 0)
+            
+            # NEW MATH: Calculate link cost
+            final_cost = get_edge_cost(via_protos, nbr_protos, rssi)
+            
+            if final_cost < float("inf"):
+                graph.setdefault(via, {})[nid] = final_cost
+                graph.setdefault(nid, {})[via] = final_cost
     return graph
 
 
@@ -127,6 +146,7 @@ class RoutingTable:
     def __init__(self):
         # { dest_id: {"next_hop": str, "via_protocol": str, "cost": float} }
         self._table = {}
+        self._cache = {}
 
     def compute(self, neighbour_table):
         """Recompute the routing table from the current neighbour table."""
@@ -164,9 +184,33 @@ class RoutingTable:
             logger.debug(TAG, "  {} -> next={} via={} cost={}".format(
                 dest, entry["next_hop"], entry["via_protocol"], entry["cost"]))
 
+    def cache_route(self, destination, next_hop, via_protocol, cost, ttl_seconds=300):
+        """Temporarily cache a route discovered via a route_query/route_resp."""
+        self._cache[destination] = {
+            "next_hop": next_hop,
+            "via_protocol": via_protocol,
+            "cost": cost,
+            "expires_at": time.time() + ttl_seconds
+        }
+        logger.info(TAG, f"Cached reactive route: {destination} via {next_hop} ({via_protocol}) for {ttl_seconds}s")
+
     def lookup(self, destination):
-        """Look up routing info for a destination. Returns dict or None."""
-        return self._table.get(destination)
+        """Look up routing info. Checks proactive table first, then reactive cache."""
+        # 1. Check the Proactive Table (Dijkstra)
+        if destination in self._table:
+            return self._table[destination]
+            
+        # 2. Check the Reactive Cache (AODV)
+        if destination in self._cache:
+            entry = self._cache[destination]
+            if time.time() < entry["expires_at"]:
+                return entry
+            else:
+                # Route has expired, prune it
+                logger.debug(TAG, f"Cached route to {destination} expired.")
+                del self._cache[destination]
+                
+        return None
 
     def get_all(self):
         return dict(self._table)
@@ -176,16 +220,16 @@ class RoutingTable:
 
 
 def _determine_protocol(next_hop, all_entries):
-    """Determine the best protocol to reach the next hop."""
+    """Determine the fastest protocol to reach the next hop."""
     entry = all_entries.get(next_hop)
     if not entry:
-        return "WiFi"  # fallback
+        return "WiFi-Direct"  # fallback
 
     protocols = entry.get("protocols", [])
     my_protos = config.CAPABILITIES
 
-    # Prefer native protocols in order: LoRa > BLE > WiFi
-    for preferred in ["LoRa", "BLE", "WiFi", "MQTT"]:
+    # FIX: Prefer high-bandwidth protocols first!
+    for preferred in ["MQTT", "WiFi-Direct", "WiFi", "BLE", "LoRa"]:
         if preferred in protocols and preferred in my_protos:
             return preferred
 

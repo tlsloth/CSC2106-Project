@@ -1,6 +1,5 @@
-# core/packet.py — Common packet format, header parsing, fragmentation
+# core/packet.py — Common packet metadata helpers and fragmentation
 
-import json
 import time
 import config
 from utils import logger
@@ -41,28 +40,6 @@ def create_packet(src, dst, payload, priority=PRIORITY_NORMAL, hop_src=None, hop
         "frag": {"index": 0, "total": 1},
         "payload": payload,
     }
-
-
-def encode_packet(packet):
-    """Encode a packet dict to JSON bytes for transmission."""
-    return json.dumps(packet).encode("utf-8")
-
-
-def decode_packet(data):
-    """Decode JSON bytes back into a packet dict. Returns None on failure."""
-    try:
-        if isinstance(data, (bytes, bytearray)):
-            data = data.decode("utf-8")
-        pkt = json.loads(data)
-        # Validate required fields
-        for field in ("src", "dst", "ttl", "priority", "seq", "payload"):
-            if field not in pkt:
-                return None
-        return pkt
-    except (ValueError, KeyError):
-        # Not all inbound payloads are encoded bridge packets.
-        pass
-        return None
 
 
 def fragment_payload(payload_bytes, max_size=None):

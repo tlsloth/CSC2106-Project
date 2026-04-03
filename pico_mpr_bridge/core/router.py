@@ -223,14 +223,14 @@ def _determine_protocol(next_hop, all_entries):
     """Determine the fastest protocol to reach the next hop."""
     entry = all_entries.get(next_hop)
     if not entry:
-        return "WiFi-Direct"  # fallback
+        return config.CAPABILITIES[0] if config.CAPABILITIES else "LoRa"  # fallback to own capability
 
     protocols = entry.get("protocols", [])
     my_protos = config.CAPABILITIES
 
-    # FIX: Prefer high-bandwidth protocols first!
+    # Prefer high-bandwidth protocols first
     for preferred in ["MQTT", "WiFi-Direct", "WiFi", "BLE", "LoRa"]:
         if preferred in protocols and preferred in my_protos:
             return preferred
 
-    return protocols[0] if protocols else "WiFi"
+    return protocols[0] if protocols else (config.CAPABILITIES[0] if config.CAPABILITIES else "LoRa")

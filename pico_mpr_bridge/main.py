@@ -126,25 +126,30 @@ def main():
             for k in expired_rp:
                 del _reverse_paths[k]
 
+        ROUTE_QUERY_PRIORITY = 3   # Lower urgency than control responses (1)
+        ROUTE_RESP_PRIORITY = 1    # Responses should be sent ASAP
+
         def _push_to_protocol(protocol, pkt):
             """Push a packet to the egress queue for the given protocol."""
+            prio = ROUTE_RESP_PRIORITY if pkt.get("type") == "route_resp" else ROUTE_QUERY_PRIORITY
             if protocol == "LoRa" and "LoRa" in config.CAPABILITIES:
-                lora_egress.push(1, pkt)
+                lora_egress.push(prio, pkt)
             elif protocol == "WiFi-Direct" and "WiFi-Direct" in config.CAPABILITIES:
-                wifi_direct_egress.push(1, pkt)
+                wifi_direct_egress.push(prio, pkt)
             else:
                 # Fallback: flood on all available interfaces
                 if "LoRa" in config.CAPABILITIES:
-                    lora_egress.push(1, pkt)
+                    lora_egress.push(prio, pkt)
                 if "WiFi-Direct" in config.CAPABILITIES:
-                    wifi_direct_egress.push(1, dict(pkt))
+                    wifi_direct_egress.push(prio, dict(pkt))
 
         def _flood_all_interfaces(pkt):
             """Broadcast a packet on every available interface."""
+            prio = ROUTE_RESP_PRIORITY if pkt.get("type") == "route_resp" else ROUTE_QUERY_PRIORITY
             if "LoRa" in config.CAPABILITIES:
-                lora_egress.push(1, pkt)
+                lora_egress.push(prio, pkt)
             if "WiFi-Direct" in config.CAPABILITIES:
-                wifi_direct_egress.push(1, dict(pkt))
+                wifi_direct_egress.push(prio, dict(pkt))
 
         while True:
             processed = 0

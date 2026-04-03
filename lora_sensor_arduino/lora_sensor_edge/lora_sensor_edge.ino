@@ -74,7 +74,7 @@ void setup()
 
 void loop()
 {
-  mesh.poll(20);
+  mesh.poll(100);  // Was 20ms — listen longer to catch ACKs
 
   mesh.tick();
 
@@ -84,5 +84,5 @@ void loop()
     lastTelemetryTime = millis();
   }
 
-  delay(50);
+  delay(10);  // Was 50ms — minimize deaf time
 }

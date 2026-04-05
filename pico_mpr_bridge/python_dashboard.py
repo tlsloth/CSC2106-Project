@@ -169,6 +169,7 @@ HTML_PAGE = r"""
             '<div class="k">Temperature</div><div>' + fmt(d.T, ' \u00b0C') + '</div>' +
             '<div class="k">Humidity</div><div>' + fmt(d.H, ' %') + '</div>' +
             '<div class="k">Link Quality (RSSI)</div><div>' + fmt(d.rssi, ' dBm') + '</div>' +
+            '<div class="k">Distance</div><div>' + fmt(d.distance, ' m') + '</div>' +
             '<div class="k">Last Update</div><div>' + fmt(d.updated_at) + '</div>' +
           '</div>' +
           '<div class="route">Last Hop: ' + fmt(d.last_hop) + ' \u27a4 Dashboard</div>' +
@@ -508,8 +509,9 @@ def _extract_dashboard_fields(data):
     last_hop = data.get("hop_dst", "unknown_bridge")
     temp = payload.get("temp", payload.get("T"))
     hum = payload.get("hum", payload.get("H"))
+    distance = payload.get("distance", None)
     rssi = data.get("rssi")
-    return node, temp, hum, rssi, last_hop
+    return node, temp, hum, rssi, last_hop, distance
 
 
 def _is_topology_msg(data):
@@ -548,13 +550,14 @@ def on_message(client, userdata, msg):
         return  # topology msgs don't carry sensor data
 
     # -- Sensor telemetry --
-    node, temp, hum, rssi, last_hop = _extract_dashboard_fields(data)
+    node, temp, hum, rssi, last_hop, distance = _extract_dashboard_fields(data)
 
-    if temp is not None:
+    if temp is not None or distance is not None:
         row = {
             "node": node,
             "T": temp,
             "H": hum,
+            "distance": distance,
             "rssi": rssi,
             "last_hop": last_hop,
             "updated_at": datetime.now().strftime("%H:%M:%S")
@@ -571,7 +574,8 @@ def index(): return HTML_PAGE
 
 @app.route("/api/nodes")
 def api_nodes():
-    with _state_lock: return jsonify(dict(_state_by_node))
+    with _state_lock:
+        return jsonify(dict(_state_by_node))
 
 @app.route("/api/topology")
 def api_topology():

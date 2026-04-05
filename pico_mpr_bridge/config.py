@@ -3,7 +3,7 @@
 # Node identity
 NODE_ID         = "bridge_B"
 NODE_ROLE       = "bridge"          # "bridge" | "sensor" | "dashboard"
-CAPABILITIES    = ["LoRa", "WiFi-Direct"] 
+CAPABILITIES    = ["BLE"] 
 
 # WiFi credentials
 WIFI_SSID       = "Gigachad Laptop"
@@ -62,7 +62,7 @@ LORA_TX_POWER   = 14               # dBm
 # LoRa over UART bridge parameters (Maker UNO + LoRa shield)
 # GP0 = UART0 TX, GP1 = UART0 RX  (matches lora_uart_bridge.py wiring)
 UART_LORA_ID         = 0
-UART_LORA_BAUD       = 9600
+UART_LORA_BAUD       = 115200 # Changed from 9600
 UART_LORA_TX_PIN     = 0           # GP0
 UART_LORA_RX_PIN     = 1           # GP1
 UART_LORA_TIMEOUT_MS = 100
@@ -75,9 +75,10 @@ BLE_DEVICE_NAME     = "PicoUltrasonic"                        # Name of BLE sens
 BLE_SCAN_DURATION   = 5000          # ms per scan cycle
 BLE_SCAN_INTERVAL   = 10000         # ms between scan cycles
 BLE_CONN_TIMEOUT    = 10000         # ms connection timeout
-BLE_DISCOVERY_DELAY_MS = 250        # wait after connect before service discovery
-BLE_DISCOVERY_TIMEOUT_MS = 4000     # service/characteristic discovery timeout
+BLE_DISCOVERY_DELAY_MS = 500        # wait after connect before service discovery
+BLE_DISCOVERY_TIMEOUT_MS = 6000     # service/characteristic discovery timeout
 BLE_DISCOVERY_RETRIES = 3           # retries for flaky BLE discovery on Pico W
+BLE_TRUSTED_SENSORS = ["PicoUltrasonic"] 
 
 # Packet settings
 PACKET_TTL          = 5             # Max hops before packet is dropped

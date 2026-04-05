@@ -7,6 +7,7 @@ import uasyncio as asyncio
 
 TAG = "LoRaUART"
 DEFAULT_PRIORITY = 5
+CONTROL_RESPONSE_PRIORITY = 1  # join_ack, hello_ack must beat route_query in egress
 
 _uart = None
 _rx_buf = b""
@@ -47,25 +48,7 @@ def _send_join_ack(req_msg, accepted, egress_queue, reason="ok", token=""):
         "reason": reason,
         "token": encrypted_token,
     }
-    egress_queue.push(DEFAULT_PRIORITY, ack)
-
-
-def _send_route_response(query_msg, route, egress_queue):
-    response = {
-        "kind": "control",
-        "type": "route_resp",
-        "node_id": config.NODE_ID,
-        "src": config.NODE_ID,
-        "req_src": query_msg.get("src") or query_msg.get("node_id", "unknown"),
-        "dst": query_msg.get("dst", "unknown"),
-        "status": "ok" if route else "no_route",
-        "next_hop": route["next_hop"] if route else "",
-        "via_protocol": route["via_protocol"] if route else "",
-        "cost": route["cost"] if route else 999,
-        "seq": query_msg.get("seq", 0),
-    }
-    egress_queue.push(DEFAULT_PRIORITY, response)
-
+    egress_queue.push(CONTROL_RESPONSE_PRIORITY, ack)
 
 def _send_hello_ack(msg, egress_queue):
     node_id = str(msg.get("node_id") or msg.get("src") or "unknown")
@@ -77,7 +60,7 @@ def _send_hello_ack(msg, egress_queue):
         "target_id": node_id,
         "bridge_id": config.NODE_ID
     }
-    egress_queue.push(DEFAULT_PRIORITY, ack)
+    egress_queue.push(CONTROL_RESPONSE_PRIORITY, ack)
 
 
 def _parse_line(raw_line):
@@ -143,6 +126,7 @@ def init():
             tx=Pin(config.UART_LORA_TX_PIN),
             rx=Pin(config.UART_LORA_RX_PIN),
             timeout=config.UART_LORA_TIMEOUT_MS,
+            rxbuf=1024,
         )
 
         logger.info(
@@ -175,6 +159,24 @@ async def rx_task(ingress_queue, egress_queue, neighbour_table, routing_table=No
                     logger.info(TAG, "UART recovered")
                 else:
                     await asyncio.sleep(5)
+                continue
+
+            # Back off during TX: radio is deaf, only drain UART for TX_DONE
+            if radio_lock.locked():
+                if _uart.any():
+                    chunk = _uart.read(_uart.any())
+                    if chunk:
+                        _rx_buf += chunk
+                        if b"TX_DONE" in _rx_buf:
+                            tx_done_event.set()
+                            # Strip the TX_DONE line but keep any trailing data
+                            idx = _rx_buf.find(b"TX_DONE")
+                            nl = _rx_buf.find(b"\n", idx)
+                            if nl >= 0:
+                                _rx_buf = _rx_buf[nl+1:]
+                            else:
+                                _rx_buf = b""
+                await asyncio.sleep_ms(10)
                 continue
 
             available = _uart.any()

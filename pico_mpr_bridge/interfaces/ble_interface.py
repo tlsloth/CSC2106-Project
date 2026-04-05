@@ -1,22 +1,4 @@
 # interfaces/ble_interface.py — BLE Mesh Bridge Interface
-#
-# Architecture (1-slot-safe):
-#   Bridge is PERIPHERAL-ONLY for mesh comms:
-#     - Advertises as "bridge_C" (or config.NODE_ID)
-#     - Exposes RX char (0x2222): sensor/bridge writes packets here
-#     - Exposes TX char (0x3333): bridge writes ack/response here, sensor reads it
-#
-#   hello_task advertises so sensors/bridges can find us.
-#   rx_server_task reads _mesh_rx_char.written() — no radio needed.
-#   tx_task (egress → outbound) is intentionally DISABLED here because the bridge
-#     never needs to initiate a BLE central connection in this design.
-#     Outbound mesh traffic routes via LoRa or WiFi-Direct.
-#     If you need BLE-central egress, re-enable and it will work because
-#     hello_task releases the lock before connect.
-#
-#   join_ack delivery: bridge writes ack into _mesh_tx_char immediately after
-#     processing join_req. The sensor reads it in the same open connection.
-#     No second outbound scan/connect needed → zero extra connection slots.
 
 import json
 import time
@@ -25,27 +7,26 @@ import gc
 from utils import logger
 from core import packet
 from core.neighbour import parse_hello
-from core.security import check_node_token, check_join_auth, generate_join_token
+import bluetooth
+ble2 = bluetooth.BLE()
+
 
 _node_tokens = {}
-
 TAG = "BLE"
-
 _ble_active = False
 
-# Legacy Sensor UUIDs (central scan for raw distance sensors)
-_SERVICE_UUID = None
-_CHAR_UUID    = None
-
-# Mesh GATT objects
+_SERVICE_UUID      = None
+_CHAR_UUID         = None
 _MESH_SERVICE_UUID = None
-_MESH_RX_CHAR_UUID = None   # 0x2222 — sensor/peer writes packets here
-_MESH_TX_CHAR_UUID = None   # 0x3333 — bridge writes acks here, sensor reads
-_mesh_service  = None
-_mesh_rx_char  = None
-_mesh_tx_char  = None       # NEW: outbound ack characteristic
+_MESH_RX_CHAR_UUID = None
+_MESH_TX_CHAR_UUID = None
+_mesh_service      = None
+_mesh_rx_char      = None
+_mesh_tx_char      = None
 
-# Radio mutex
+# Raw BLE handle for RX char value — needed for gatts_write buffer expansion
+_rx_value_handle   = None
+
 _radio_lock = None
 
 def _get_lock():
@@ -64,6 +45,7 @@ def init():
     global _ble_active, _SERVICE_UUID, _CHAR_UUID
     global _MESH_SERVICE_UUID, _MESH_RX_CHAR_UUID, _MESH_TX_CHAR_UUID
     global _mesh_service, _mesh_rx_char, _mesh_tx_char
+    global _rx_value_handle
 
     try:
         import bluetooth
@@ -72,16 +54,17 @@ def init():
         ble = bluetooth.BLE()
         ble.active(True)
 
-        # Legacy sensor UUIDs
-        _SERVICE_UUID = bluetooth.UUID(config.BLE_SERVICE_UUID)
-        _CHAR_UUID    = bluetooth.UUID(config.BLE_CHAR_UUID)
+        # ── KEY FIX: Set MTU to 247 on the peripheral side ──
+        # This allows the remote central to negotiate a larger MTU,
+        # letting it send writes > 20 bytes without Error 13 (ENOMEM).
+        ble.config(mtu=247)
 
-        # Mesh UUIDs
+        _SERVICE_UUID      = bluetooth.UUID(config.BLE_SERVICE_UUID)
+        _CHAR_UUID         = bluetooth.UUID(config.BLE_CHAR_UUID)
         _MESH_SERVICE_UUID = bluetooth.UUID(0x1111)
         _MESH_RX_CHAR_UUID = bluetooth.UUID(0x2222)
         _MESH_TX_CHAR_UUID = bluetooth.UUID(0x3333)
 
-        # GATT server: one service, two characteristics
         _mesh_service = aioble.Service(_MESH_SERVICE_UUID)
 
         # RX: central writes here (sensor → bridge)
@@ -91,17 +74,32 @@ def init():
         )
 
         # TX: bridge writes here, central reads (bridge → sensor ack)
-        # read=True + notify=True so the sensor can either poll-read or subscribe
         _mesh_tx_char = aioble.Characteristic(
             _mesh_service, _MESH_TX_CHAR_UUID,
             read=True, notify=True
         )
 
         aioble.register_services(_mesh_service)
+        
+        print("DEBUG RX handle:", _mesh_rx_char._value_handle)
+        print("DEBUG TX handle:", _mesh_tx_char._value_handle)
+
+        # ── KEY FIX: Expand RX characteristic buffer to 256 bytes ──
+        # By default aioble caps characteristic writes at 20 bytes (ATT MTU - 3).
+        # Pre-writing with bytes(256) raises the internal buffer ceiling so the
+        # NimBLE stack can accept writes up to 256 bytes after MTU exchange.
+        # This must be called AFTER register_services().
+        try:
+            # Access the raw handle aioble stored on the characteristic
+            rx_handle = _mesh_rx_char._value_handle
+            _rx_value_handle = rx_handle
+            ble.gatts_write(rx_handle, bytes(256))
+            logger.info(TAG, "RX char buffer expanded to 256 bytes (handle {})".format(rx_handle))
+        except Exception as e:
+            logger.warn(TAG, "gatts_write buffer expand failed: {} — writes may be truncated".format(e))
 
         _ble_active = True
-        logger.info(TAG, "BLE initialised (peripheral mesh server, node={})".format(
-            config.NODE_ID))
+        logger.info(TAG, "BLE initialised (peripheral mesh server, node={})".format(config.NODE_ID))
         return True
 
     except Exception as e:
@@ -214,14 +212,14 @@ async def rx_task(ingress_queue, neighbour_table):
 
 
 # ──────────────────────────────────────────────
-# 2. Mesh RX server (peripheral — no radio lock)
+# 2. Mesh RX server (peripheral — no radio lock needed)
 # ──────────────────────────────────────────────
 
 async def rx_server_task(ingress_queue, neighbour_table):
     """
     Wait for writes on _mesh_rx_char (0x2222).
-    For join_req: validate, generate token, write join_ack to _mesh_tx_char (0x3333).
-    The connected sensor reads 0x3333 in the SAME open connection — no extra connect.
+    For join_req: validate, write join_ack to _mesh_tx_char (0x3333).
+    Sensor reads ack in the same open connection.
     """
     import uasyncio as asyncio
     logger.info(TAG, "BLE Mesh RX server started")
@@ -245,24 +243,16 @@ async def rx_server_task(ingress_queue, neighbour_table):
             msg_type = msg.get("type", "")
             msg_src  = msg.get("src") or msg.get("node_id", "unknown")
 
+            logger.debug(TAG, "RX {} from {} ({} bytes)".format(msg_type, msg_src, len(value)))
+
             # ── JOIN REQUEST ──
             if msg_type == "join_req":
-                logger.info(TAG, "JOIN_REQ from {}  net={} auth={}".format(
-                    msg_src, msg.get("network"), msg.get("auth")))
+                logger.info(TAG, "JOIN_REQ from {} net={}".format(msg_src, msg.get("network")))
 
-                ok, reason = check_join_auth(
-                    msg,
-                    getattr(config, "MESH_NETWORK_NAME", "DEFAULT_MESH"),
-                    config.MESH_JOIN_KEY
-                )
-                logger.info(TAG, "  → {} ({})".format("ACCEPT" if ok else "REJECT", reason))
-
-                token_str = ""
-                if ok:
-                    token_str             = generate_join_token(msg_src, config.MESH_JOIN_KEY)
-                    _node_tokens[msg_src] = token_str
-                    neighbour_table.update(msg_src, protocols=["BLE"],
-                                           rssi=-60, capabilities=["BLE"])
+                # No auth check — accept all
+                ok = True
+                _node_tokens[msg_src] = "trusted"
+                neighbour_table.update(msg_src, protocols=["BLE"], rssi=-60, capabilities=["BLE"])
 
                 ack = {
                     "type":      "join_ack",
@@ -270,36 +260,20 @@ async def rx_server_task(ingress_queue, neighbour_table):
                     "src":       config.NODE_ID,
                     "bridge_id": config.NODE_ID,
                     "dst":       msg_src,
-                    "accepted":  ok,
-                    "token":     token_str,
-                    "reason":    reason,
+                    "accepted":  True,
+                    "token":     "",
+                    "reason":    "ok",
                 }
-
-                # Write ack into TX char — sensor reads it from the same connection
                 _write_tx_char(ack)
 
             # ── HELLO ──
             elif msg_type == "hello":
-                valid, reason = check_node_token(
-                    msg_src, msg.get("token", ""), _node_tokens)
-                if not valid:
-                    logger.warn(TAG, "hello from {} rejected: {}".format(msg_src, reason))
-                    continue
                 neighbour_table.update(msg_src, protocols=["BLE"], rssi=-60)
                 logger.debug(TAG, "hello from {} OK".format(msg_src))
 
             # ── DATA / ALL OTHER ──
             else:
-                trusted = getattr(config, "BLE_TRUSTED_SENSORS", [])
-                if msg_src not in trusted:
-                    valid, reason = check_node_token(
-                        msg_src, msg.get("token", ""), _node_tokens)
-                    if not valid:
-                        logger.warn(TAG, "BLE packet from {} rejected: {}".format(
-                            msg_src, reason))
-                        continue
-
-                ingress_queue.push(msg.get("priority", 5), msg)
+                ingress_queue.push(int(msg.get("priority", 5)), msg)
                 logger.debug(TAG, "BLE {} from {} → ingress".format(msg_type, msg_src))
 
         except Exception as e:
@@ -309,7 +283,7 @@ async def rx_server_task(ingress_queue, neighbour_table):
 
 
 def _write_tx_char(msg_dict):
-    """Synchronously update the TX characteristic value (no connection needed)."""
+    """Synchronously update the TX characteristic value."""
     if _mesh_tx_char is None:
         return
     try:
@@ -322,8 +296,6 @@ def _write_tx_char(msg_dict):
 
 # ──────────────────────────────────────────────
 # 3. Egress TX task (bridge → BLE central peer)
-#    Only runs when the bridge needs to push a packet
-#    to a BLE-addressed neighbour (rare in this design).
 # ──────────────────────────────────────────────
 
 async def tx_task(egress_queue, neighbour_table):
@@ -381,8 +353,7 @@ async def tx_task(egress_queue, neighbour_table):
                         service.characteristic(_MESH_RX_CHAR_UUID), 3000)
                     if char:
                         await char.write(payload_bytes)
-                        logger.debug(TAG, "TX {} → {}".format(
-                            pkt.get("type"), target_name))
+                        logger.debug(TAG, "TX {} → {}".format(pkt.get("type"), target_name))
 
                 await connection.disconnect()
                 gc.collect()
@@ -413,31 +384,133 @@ async def hello_task():
             continue
 
         try:
-            # Lock the radio for advertising
-            async with _get_lock():
-                connection = await aioble.advertise(
-                    250_000,
-                    name=config.NODE_ID,
-                    services=[_MESH_SERVICE_UUID],
-                    connectable=True,
-                    timeout_ms=5000 
-                )
+            logger.debug(TAG, "hello_task: advertising...")
+            # No lock — bridge is peripheral-only, nothing to mutex
+            async with await aioble.advertise(
+                250_000,
+                name=config.NODE_ID,
+                services=[_MESH_SERVICE_UUID],
+                connectable=True,
+                timeout_ms=5000,
+            ) as connection:
+                logger.debug(TAG, "Central connected")
+                await connection.disconnected()
+                logger.debug(TAG, "Central disconnected")
 
+        except Exception as e:
+            logger.debug(TAG, "hello_task: adv window ended ({})".format(e))
+
+        await asyncio.sleep_ms(100)
+        
+        
+        
+async def bridge_discovery_task(ingress_queue, neighbour_table):
+    import uasyncio as asyncio
+    import aioble
+    logger.info(TAG, "BLE bridge discovery task started")
+
+    while True:
+        await asyncio.sleep(15)
+        if not _ble_active:
+            continue
+
+        async with _get_lock():
+            target_addr = target_addr_type = target_name = None
+            try:
+                async with aioble.scan(
+                    duration_ms=4000, interval_us=30000, window_us=30000, active=True
+                ) as scanner:
+                    async for result in scanner:
+                        name = result.name()
+                        if not name or not name.startswith("bridge_"):
+                            continue
+                        if name == config.NODE_ID:
+                            continue  # skip self
+                        target_addr_type = result.device.addr_type
+                        target_addr      = bytes(result.device.addr)
+                        target_name      = name
+                        logger.debug(TAG, "Found peer bridge: {} rssi={}".format(name, result.rssi))
+                        break
+            except Exception as e:
+                logger.error(TAG, "Bridge discovery scan error: {}".format(e))
+                continue
+
+            if not target_addr:
+                continue
+
+            hello_pkt = {
+                "type":    "hello",
+                "kind":    "control",
+                "src":     config.NODE_ID,
+                "node_id": config.NODE_ID,
+                "hop_dst": target_name,
+                "token":   "",
+                "seq":     0,
+                "ttl":     3,
+            }
+            payload_bytes = json.dumps(hello_pkt).encode("utf-8")
+
+            connection = None
+            try:
+                gc.collect()
+                dev = aioble.Device(target_addr_type, target_addr)
+                connection = await asyncio.wait_for_ms(dev.connect(), 5000)
+
+                try:
+                    await asyncio.wait_for_ms(connection.exchange_mtu(247), 3000)
+                except Exception:
+                    pass
+
+                await asyncio.sleep_ms(500)
+
+                # ── Collect services into list first ──
+                services_found = []
+                async for svc in connection.services():
+                    services_found.append(svc)
+
+                service = next(
+                    (s for s in services_found if s.uuid == _MESH_SERVICE_UUID), None)
+
+                if not service:
+                    logger.warn(TAG, "Bridge discovery: mesh service not found on {}".format(
+                        target_name))
+                    await asyncio.wait_for_ms(connection.disconnect(), 3000)
+                    gc.collect()
+                    continue
+
+                # ── Collect characteristics into list first ──
+                chars_found = []
+                async for c in service.characteristics():
+                    chars_found.append(c)
+
+                rx_char = next(
+                    (c for c in chars_found if c.uuid == _MESH_RX_CHAR_UUID), None)
+
+                if not rx_char:
+                    logger.warn(TAG, "Bridge discovery: RX char not found on {}".format(
+                        target_name))
+                    await asyncio.wait_for_ms(connection.disconnect(), 3000)
+                    gc.collect()
+                    continue
+
+                await asyncio.wait_for_ms(rx_char.write(payload_bytes, response=True), 5000)
+                logger.info(TAG, "Sent hello to peer bridge {}".format(target_name))
+
+                # Register peer bridge as neighbour locally
+                neighbour_table.update(target_name, protocols=["BLE"],
+                                       rssi=-60, capabilities=["BLE"])
+
+                await asyncio.wait_for_ms(connection.disconnect(), 3000)
+                gc.collect()
+
+            except Exception as e:
+                logger.warn(TAG, "Bridge discovery connect error: {}".format(e))
                 if connection:
-                    logger.debug(TAG, "Central connected")
-                    
-                    # STAY INSIDE THE LOCK while connected.
-                    # This prevents the bridge from trying to advertise 
-                    # while the sensor is doing discovery.
-                    await connection.disconnected()
-                    
-                    # 🔥 NEW: After they disconnect, keep the lock for 1 second
-                    # to let the BLE stack clean up before the next advertise.
-                    await asyncio.sleep_ms(1000)
-                    logger.debug(TAG, "Central disconnected & Radio settled")
+                    try:
+                        await asyncio.wait_for_ms(connection.disconnect(), 3000)
+                    except Exception:
+                        pass
+                gc.collect()
 
-        except Exception:
-            pass
 
-        # Small breather between advertising windows
-        await asyncio.sleep_ms(500)
+

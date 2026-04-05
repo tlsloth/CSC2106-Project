@@ -455,7 +455,7 @@ def main():
         # BLE Tasks
         if ble_ok:
             tasks.append(asyncio.create_task(
-                ble_interface.rx_task(ingress_queue, ble_egress, neighbour_table)))  # ← must be here
+                ble_interface.rx_server_task(ingress_queue, neighbour_table)))
             tasks.append(asyncio.create_task(
                 ble_interface.tx_task(ble_egress, neighbour_table)))
             tasks.append(asyncio.create_task(

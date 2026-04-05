@@ -268,11 +268,12 @@ async def rx_server_task(ingress_queue, neighbour_table):
 
             # ── HELLO ──
             elif msg_type == "hello":
-                neighbour_table.update(msg_src, protocols=["BLE"], rssi=-60)
+                neighbour_table.update(msg_src, protocols=["BLE"], rssi=-60, capabilities=["BLE"])
                 logger.debug(TAG, "hello from {} OK".format(msg_src))
 
             # ── DATA / ALL OTHER ──
             else:
+                neighbour_table.update(msg_src, protocols=["BLE"], rssi=-60, capabilities=["BLE"])
                 ingress_queue.push(int(msg.get("priority", 5)), msg)
                 logger.debug(TAG, "BLE {} from {} → ingress".format(msg_type, msg_src))
 

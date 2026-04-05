@@ -249,11 +249,7 @@ void setup()
     while (1)
       ;
 
-<<<<<<< HEAD
   rf95.setTxPower(2, false);
-=======
-  rf95.setTxPower(2, false); // 2dBm for desk testing
->>>>>>> feat-dynamic-node-discovery
   rf95.setModeRx();
 }
 

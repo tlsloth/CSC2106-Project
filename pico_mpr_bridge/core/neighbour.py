@@ -27,6 +27,9 @@ class NeighbourTable:
             entry["protocols"] = list(set(entry["protocols"]) | set(protocols))
             entry["rssi"] = rssi
             entry["last_seen"] = now
+            if "via" in entry:
+                del entry["via"]
+                logger.info(TAG, "Neighbour {} promoted from remote topology to direct link".format(node_id))
             if capabilities:
                 entry["capabilities"] = capabilities
         else:

@@ -544,6 +544,7 @@ def on_message(client, userdata, msg):
             _topo_by_node[reporter] = {
                 "neighbours": data["neighbours"],
                 "updated_at": datetime.now().strftime("%H:%M:%S"),
+                "_ts": time.time(),
             }
         print(f"[TOPO] Updated neighbour table from {reporter} "
               f"({len(data['neighbours'])} neighbours)")
@@ -579,7 +580,15 @@ def api_nodes():
 
 @app.route("/api/topology")
 def api_topology():
-    with _topo_lock: return jsonify(dict(_topo_by_node))
+    # Prune topology entries from bridges that haven't reported in 3× HELLO_INTERVAL
+    stale_threshold = HELLO_INTERVAL * 3
+    now = time.time()
+    with _topo_lock:
+        stale = [k for k, v in _topo_by_node.items() if now - v.get("_ts", now) > stale_threshold]
+        for k in stale:
+            print(f"[TOPO] Pruning stale topology from {k}")
+            del _topo_by_node[k]
+        return jsonify(dict(_topo_by_node))
 
 
 def dashboard_hello_loop(client):

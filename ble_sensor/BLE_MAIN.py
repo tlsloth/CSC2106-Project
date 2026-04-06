@@ -198,7 +198,21 @@ async def send_mesh_packet(pkt_dict, expect_ack=False):
                 await rx_char.write(payload_bytes)
                 print("[BLE_EDGE] Delivered to {}".format(target_name))
 
-                # ... (rest of your existing ACK reading code) ...
+                # ───── LOCK GATEWAY ─────
+                _dynamic_gateway = target_name
+                print("[BLE_EDGE] Locked onto gateway: {}".format(_dynamic_gateway))
+
+                # ───── ACK READ (join_req only) ─────
+                ack_msg = None
+                if expect_ack and tx_char:
+                    try:
+                        await asyncio.sleep_ms(500)
+                        ack_raw = await asyncio.wait_for_ms(tx_char.read(), 5000)
+                        if ack_raw:
+                            ack_msg = json.loads(ack_raw.decode("utf-8", "ignore"))
+                            print("[BLE_EDGE] ACK: {}".format(ack_msg.get("type")))
+                    except Exception as e:
+                        print("[BLE_EDGE] ACK read failed: {}".format(e))
 
                 await _safe_disconnect(connection)
                 return True, ack_msg
